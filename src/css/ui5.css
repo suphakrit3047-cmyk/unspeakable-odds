@@ -1,0 +1,158 @@
+/* ===== v5 game UI ===== */
+:root{
+  --display:'Chakra Petch','Sarabun','Noto Sans Thai',system-ui,sans-serif;
+  --num:'Pixelify Sans','Chakra Petch',ui-monospace,monospace;
+  --felt:#164240; --felt2:#0b2423; --rim:#4a3320; --rim2:#22160c;
+  --bone:#efe4c8; --gold:#e6b94f;
+  --btnR:#c63f2b; --btnRd:#6f1d12; --btnT:#2a6a6e; --btnTd:#123a3c; --btnN:#26343c; --btnNd:#0c1519;
+}
+html,body{background:#090c0f}
+body{font-family:var(--body)}
+h1,h2,h3,.btn,.eyebrow,.tab,.rank{font-family:var(--display)}
+h2{font-size:1.5rem;letter-spacing:.01em}
+.eyebrow{font-weight:600}
+#crt{position:fixed;inset:0;pointer-events:none;z-index:45;
+  background:repeating-linear-gradient(0deg,rgba(0,0,0,.22) 0 1px,transparent 1px 3px),
+             radial-gradient(ellipse at 50% 45%,transparent 55%,rgba(0,0,0,.55) 100%);
+  mix-blend-mode:multiply}
+/* numbers in pixel type */
+.bar .lbl b,#sb-n,.fnum,.face b,.coins,.shards,.intent .part,.seq .part,.forecast .part,.chip,.node,.relic i,.fc-row b{font-family:var(--num)}
+/* chunky buttons */
+.btn{border:0;border-radius:12px;background:var(--btnN);color:var(--fg);box-shadow:0 5px 0 var(--btnNd),inset 0 1px 0 rgba(255,255,255,.07);
+  transition:transform .08s,box-shadow .08s,filter .15s;font-weight:700;letter-spacing:.02em}
+.btn:hover:not(:disabled){filter:brightness(1.12)}
+.btn:active:not(:disabled){transform:translateY(4px);box-shadow:0 1px 0 var(--btnNd)}
+.btn.primary{background:var(--btnR);color:#fff2e4;box-shadow:0 5px 0 var(--btnRd),inset 0 1px 0 rgba(255,255,255,.18)}
+.btn.primary:active:not(:disabled){box-shadow:0 1px 0 var(--btnRd)}
+#b-reroll,#b-rs-reroll{background:var(--btnT);box-shadow:0 5px 0 var(--btnTd),inset 0 1px 0 rgba(255,255,255,.12)}
+#b-reroll:active:not(:disabled){box-shadow:0 1px 0 var(--btnTd)}
+.btn:disabled{opacity:.42;filter:grayscale(.4)}
+.btn.ghost{box-shadow:none;background:transparent}
+.help{box-shadow:0 3px 0 #000;border-width:2px}
+/* panels */
+.card,.foe-card,.relic-card,.evopt,.shop-item,.pick,.chap,.cx-item,.cx-lore,.forecast,.log,.coach,.bar{border-width:2px;box-shadow:0 4px 0 rgba(0,0,0,.35)}
+.foe-card,.relic-card,.evopt,.diecard,.cx-item,.chap{transition:transform .15s}
+.foe-card:hover,.relic-card:hover,.evopt:not(:disabled):hover,.diecard:hover{transform:translateY(-3px)}
+/* ---- title ---- */
+.hero{align-items:center;text-align:center;min-height:250px;justify-content:flex-end;padding-top:130px}
+.hero-art{left:50%;right:auto;top:-10px;width:250px;opacity:.5;transform:translateX(-50%);animation:heroFloat 6s ease-in-out infinite}
+@keyframes heroFloat{50%{transform:translateX(-50%) translateY(-8px)}}
+.logo{display:flex;flex-direction:column;line-height:.95;font-family:var(--num);font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.logo span:first-child{font-size:2.3rem;color:var(--bone);text-shadow:0 3px 0 #3b1410,0 0 22px rgba(198,63,43,.55)}
+.logo span:last-child{font-size:3.4rem;color:var(--btnR);text-shadow:0 4px 0 #2a0b07,0 0 26px rgba(198,63,43,.6)}
+.hero .subtitle{font-family:var(--display);letter-spacing:.2em;color:var(--gold)}
+#s-title > p.dim{text-align:center}
+#s-title .menu{gap:12px}
+#s-title .menu .btn{padding:14px 16px;font-size:1.02rem}
+#title-rec,#title-shards{text-align:center;align-self:center}
+.legend-box summary{cursor:pointer;list-style:none}
+.legend-box summary::-webkit-details-marker{display:none}
+.legend-box summary h3::after{content:" ▾";color:var(--dim)}
+.legend-box[open] summary{margin-bottom:10px}
+/* ---- battle HUD ---- */
+#s-battle{gap:12px}
+.hud{display:flex;flex-direction:column;gap:8px}
+.stats{gap:8px}
+.bar{background:#0f171b;padding:6px 10px}
+.track{height:12px;border:2px solid #05080a;border-radius:6px;background:#05080a}
+.fill{border-radius:3px;background-image:linear-gradient(180deg,rgba(255,255,255,.28) 0 35%,transparent 35%) !important}
+.hp .fill{background-color:var(--blood)}.sn .fill{background-color:var(--gold)}.sn.low .fill{background-color:var(--void)}
+.bar .lbl b{font-size:1rem}
+/* ---- arena ---- */
+.arena{position:relative}
+.enemy{grid-template-columns:1fr !important;justify-items:center;text-align:center;gap:6px;padding:8px 14px 14px;border-width:2px;
+  background:radial-gradient(ellipse at 50% 38%,rgba(120,40,40,.25),transparent 60%),linear-gradient(180deg,#161d22,#0d1316);box-shadow:0 6px 0 rgba(0,0,0,.4)}
+.enemy .portrait{width:min(210px,58vw) !important;margin-top:-4px;filter:drop-shadow(0 10px 10px rgba(0,0,0,.6))}
+.enemy .info{width:100%;align-items:stretch;gap:8px}
+.enemy h2{font-size:1.6rem;display:flex;gap:8px;justify-content:center;align-items:center}
+.enemy .chips{justify-content:center}
+.intent{justify-content:center;font-size:1rem;border:2px solid #5a2a22;background:#1a0e0c;border-style:solid}
+.intent .ic{width:22px;height:22px}
+.intent .part{font-size:1.25rem}
+.bskill,.brule{text-align:left}
+/* ---- altar (the felt table) ---- */
+.altar{display:flex;flex-direction:column;gap:12px;padding:16px 12px 16px;border-radius:20px;
+  background:radial-gradient(ellipse at 50% 0%,rgba(255,255,255,.07),transparent 60%),
+             repeating-linear-gradient(45deg,rgba(0,0,0,.05) 0 2px,transparent 2px 5px),
+             linear-gradient(180deg,var(--felt),var(--felt2));
+  border:4px solid var(--rim);box-shadow:inset 0 0 0 2px var(--rim2),inset 0 10px 30px rgba(0,0,0,.45),0 8px 0 #000}
+.altar .chips:empty{display:none}
+.tray{gap:12px 8px}
+.die{background:transparent !important;border:0 !important;padding:16px 2px 4px;gap:8px}
+.die .tint{display:none}
+.die .nm{color:#b9cdc5;font-size:.7rem}
+.die .lock{color:var(--gold);top:0;right:50%;transform:translateX(50%);font-weight:700}
+.die .frz,.die .dmark,.die .smark{top:0}
+.face{width:66px;height:66px;border-radius:14px;border:3px solid var(--fc);
+  background:linear-gradient(180deg,color-mix(in srgb,var(--fc) 34%,#241a14),color-mix(in srgb,var(--fc) 12%,#0e0a08));
+  color:color-mix(in srgb,var(--fc) 55%,#fff);
+  box-shadow:0 6px 0 color-mix(in srgb,var(--fc) 35%,#000),0 12px 16px rgba(0,0,0,.5),inset 0 2px 0 rgba(255,255,255,.18);
+  transition:transform .16s cubic-bezier(.2,1.4,.4,1),box-shadow .16s}
+.face .ic{width:26px;height:26px;stroke-width:2.4}
+.face b{font-size:1.15rem}
+.die.held .face{transform:translateY(-14px);box-shadow:0 6px 0 color-mix(in srgb,var(--fc) 35%,#000),0 0 0 3px var(--gold),0 18px 22px rgba(0,0,0,.55),0 0 22px rgba(230,185,79,.5)}
+.die:hover:not(.frozen):not(.banished) .face{transform:translateY(-4px)}
+.die.held:hover .face{transform:translateY(-14px)}
+.die.frozen .face{filter:grayscale(.8) brightness(.7)}
+.face.sm{width:40px;height:40px;border-width:2px;border-radius:9px;box-shadow:0 3px 0 color-mix(in srgb,var(--fc) 35%,#000)}
+.face.sm .ic{width:16px;height:16px}
+.forecast{background:rgba(0,0,0,.32);border-color:rgba(0,0,0,.35);box-shadow:none}
+.combo-banner{font-family:var(--num);font-size:1.15rem;letter-spacing:.03em}
+.scorebox{background:rgba(0,0,0,.35);border:2px solid rgba(230,120,80,.4)}
+.scorebox b{font-size:2.8rem}
+.altar .row .btn{padding:15px 10px;font-size:1.05rem}
+.log{font-size:.8rem;opacity:.85}
+/* relic row like a joker shelf */
+.relicrow{background:#0f171b;border:2px solid var(--line);border-radius:12px;padding:6px 8px;box-shadow:0 4px 0 rgba(0,0,0,.35)}
+.relic{background:#1a2329;border-width:2px;box-shadow:0 3px 0 #000}
+/* choose / reward cards */
+.foe-card{border-color:color-mix(in srgb,var(--rk) 55%,var(--line))}
+.fc-head .portrait{width:92px}
+.rank{font-family:var(--display)}
+/* floating numbers bigger */
+.fnum{font-size:1.9rem}.fnum.crit{font-size:3rem}
+@media (max-width:380px){.face{width:56px;height:56px}.logo span:last-child{font-size:2.8rem}}
+@media (prefers-reduced-motion:reduce){.hero-art{animation:none}}
+/* compact battle so the whole fight fits one phone screen */
+#s-battle{gap:8px}
+#s-battle .hud{gap:6px}
+#s-battle .bar{padding:3px 8px}
+#s-battle .bar .lbl{font-size:.74rem}
+#s-battle .track{height:9px;margin-top:2px}
+#b-where{font-size:.68rem}
+.relicrow{padding:4px 6px}
+.relic{width:36px;height:36px}.relic .ricon{width:28px;height:28px}
+.enemy{grid-template-columns:auto 1fr !important;text-align:left;justify-items:stretch;align-items:center;padding:8px 12px 10px}
+.enemy .portrait{width:min(130px,34vw) !important;margin:0}
+.enemy h2{font-size:1.3rem;justify-content:flex-start}
+.enemy .info{gap:5px}
+.enemy .info > div > p.dim{font-size:.76rem !important}
+.enemy .chips{justify-content:flex-start}
+.enemy .bar{padding:3px 8px}
+.intent{font-size:.9rem;padding:4px 8px}
+.intent .part{font-size:1.1rem}
+.bskill,.brule{font-size:.74rem;padding:3px 7px}
+.altar{padding:10px 10px 12px;gap:8px}
+.tray{gap:6px}
+.die{padding:13px 0 2px;gap:5px}
+.face{width:58px;height:58px}
+.face .ic{width:22px;height:22px}
+.altar .row .btn{padding:13px 8px}
+.forecast{padding:6px 10px;font-size:.82rem}
+@media (max-width:380px){.face{width:52px;height:52px}.enemy .portrait{width:30vw !important}}
+/* all dice on one row */
+.tray{display:flex !important;justify-content:center;gap:4px}
+.tray .die{flex:1 1 0;min-width:0;max-width:84px}
+.tray .face{width:100%;max-width:60px;height:auto;aspect-ratio:1}
+.tray .face .ic{width:42%;height:42%}
+.tray .face b{font-size:clamp(.85rem,3.6vw,1.1rem)}
+.tray .die .nm{font-size:.6rem}
+.tray .die .lock,.tray .die .frz,.tray .die .dmark,.tray .die .smark{font-size:.55rem;white-space:nowrap}
+.tray .die .dmark,.tray .die .smark{left:50%;transform:translateX(-50%)}
+.tray .die .lock{top:auto;bottom:-2px}
+.tray .face{width:90%}
+/* numbers: readable, not pixel */
+:root{--num:'Chakra Petch','Sarabun',system-ui,sans-serif}
+.bar .lbl b,#sb-n,.fnum,.face b,.coins,.shards,.intent .part,.seq .part,.forecast .part,.chip,.node,.relic i,.fc-row b{font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:0}
+.logo{font-family:'Pixelify Sans','Chakra Petch',monospace}
+.combo-banner{font-family:var(--display)}

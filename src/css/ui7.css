@@ -1,0 +1,182 @@
+/* ===== v7: enemy traits, danger telegraph, skill fire, upgrades ===== */
+.btrait{font-size:.8rem;background:var(--bg);border:1px solid #c0503a;border-left:4px solid #c0503a;border-radius:8px;padding:4px 8px;color:var(--fg);text-align:left;margin:0}
+.btrait b{color:#d0644a;margin-right:4px}
+.btrait.hot{background:#3a0f0a;border-color:#ff5a3a;animation:hotpulse 1s ease-in-out infinite}
+.btrait.hot b{color:#ff8a6a}
+@keyframes hotpulse{50%{box-shadow:0 0 12px rgba(255,80,50,.55)}}
+#c-detail .btrait{margin-top:6px;background:rgba(255,255,255,.35);color:var(--ink);border-color:#a83223}
+#c-detail .btrait b{color:#a83223}
+.intent{position:relative;transition:border-color .2s,background .2s}
+.intent.danger{border-color:#ff4a2a!important;background:linear-gradient(180deg,#3a0c08,#1a0806)!important;animation:dangerpulse .9s ease-in-out infinite}
+@keyframes dangerpulse{50%{box-shadow:0 0 0 3px rgba(255,74,42,.25),0 0 18px rgba(255,74,42,.45)}}
+.intent .dz{margin-left:8px;font-family:var(--display);font-weight:700;color:#ffd0c0;background:#c0281a;border-radius:6px;padding:0 6px;font-size:.78rem;letter-spacing:.04em}
+.enemy .portrait.lunge{animation:lunge .5s cubic-bezier(.3,1.6,.5,1)}
+@keyframes lunge{0%{transform:none}35%{transform:translateY(14px) scale(1.14);filter:brightness(1.4) saturate(1.3)}100%{transform:none}}
+.die.skfire{animation:skfire .5s ease-out}
+.die.skfire .face{box-shadow:0 0 0 3px #f1c45a,0 0 22px rgba(241,196,90,.85)!important}
+@keyframes skfire{30%{transform:translateY(-8px) scale(1.08)}}
+.fnum.skill{color:#f1c45a;font-size:1rem;text-shadow:0 2px 6px #000,0 0 10px rgba(241,196,90,.6)}
+.die .smark{max-width:calc(100% - 8px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:rgba(20,12,6,.75);border-radius:4px;padding:0 3px}
+/* shop: upgrades + potions */
+.sh-note{font-size:.84rem;margin-top:-4px}
+.up-row{display:grid;grid-template-columns:48px 1fr auto;gap:10px;align-items:center;padding:8px 10px;
+  color:var(--ink);background:linear-gradient(170deg,var(--parch),var(--parch2));border:2px solid #7a5a32;border-radius:10px;box-shadow:0 4px 0 #2a1a0d}
+.up-row .portrait{width:48px;border-radius:8px;background:#1a110b}
+.up-row .si-meta{display:flex;flex-direction:column;gap:3px;min-width:0}
+.up-row b{font-family:var(--display);color:var(--ink)}
+.up-row .dim{color:var(--ink2);font-size:.84rem}
+.up-row .preview{display:flex;gap:2px;flex-wrap:nowrap}
+.up-row .preview .face{width:24px!important;height:24px!important;min-width:0;font-size:.66rem;padding:0;gap:0;border-radius:6px}
+.up-row .preview .face .ic{width:11px;height:11px}
+.up-row .preview .face b{color:#f3e6c8}
+@media (max-width:360px){.up-row .preview .face{width:21px!important;height:21px!important}}
+.up-pips{display:flex;gap:3px}.up-pips i{width:10px;height:10px;border-radius:50%;border:1.5px solid #8a4b14;display:block}.up-pips i.on{background:#d08a2a;box-shadow:0 0 6px rgba(208,138,42,.7)}
+.face.up{box-shadow:0 0 0 2px #d08a2a,inset 0 -3px 6px rgba(0,0,0,.4)!important}
+.face.up b{color:#ffcf6a}
+.big-ic{width:48px;height:48px;display:grid;place-items:center;border-radius:10px;background:#2a1a10}
+.big-ic .ic{width:26px;height:26px}.big-ic.hp{color:#e0604a}.big-ic.sn{color:#e0c060}
+
+.enemy .btrait{font-size:.76rem;padding:3px 7px}
+@media (max-height:760px){.enemy .btrait{font-size:.7rem;padding:2px 6px}}
+/* ===== splash / start screen ===== */
+.splash{position:relative;z-index:1;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:24px 16px 40px;text-align:center;overflow:hidden}
+.splash[hidden]{display:none!important}
+.sp-glow{position:absolute;left:50%;top:38%;width:520px;height:520px;transform:translate(-50%,-50%);border-radius:50%;
+  background:radial-gradient(circle,rgba(70,140,110,.28),rgba(198,63,43,.12) 45%,transparent 70%);animation:spGlow 5s ease-in-out infinite;pointer-events:none}
+@keyframes spGlow{50%{opacity:.6;transform:translate(-50%,-50%) scale(1.08)}}
+.sp-art{width:min(300px,78vw)!important;opacity:.9;filter:drop-shadow(0 0 30px rgba(60,140,100,.45));animation:spFloat 6s ease-in-out infinite;position:relative;display:block;aspect-ratio:1;height:auto;flex:none}
+@keyframes spFloat{50%{transform:translateY(-10px)}}
+.sp-title{position:relative;display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:-30px}
+.sp-title .logo span:first-child{font-size:2.6rem}.sp-title .logo span:last-child{font-size:4rem}
+.sp-title .subtitle{font-family:var(--display);letter-spacing:.25em;color:var(--gold,#d0a052);margin:0}
+.sp-start{position:relative;min-width:220px;font-size:1.5rem!important;letter-spacing:.3em;padding:14px 28px!important;margin-top:14px;animation:spPulse 1.6s ease-in-out infinite}
+@keyframes spPulse{50%{transform:scale(1.05);box-shadow:0 6px 0 #5a160c,0 0 28px rgba(198,63,43,.6)}}
+.sp-hint{position:relative;font-size:.82rem;color:var(--dim);margin:0;opacity:.8}
+body.sp-leave .splash{animation:spOut .38s ease-in forwards}
+@keyframes spOut{to{opacity:0;transform:scale(1.06);filter:blur(4px)}}
+@media (max-width:360px){.sp-title .logo span:first-child{font-size:2.1rem}.sp-title .logo span:last-child{font-size:3.2rem}}
+@media (prefers-reduced-motion:reduce){.sp-art,.sp-glow,.sp-start{animation:none}}
+/* title: icon-only sound button in the corner */
+#s-title{position:relative}
+.title-snd{position:absolute;top:10px;right:12px;z-index:3;width:44px;height:44px;border-radius:50%;display:grid;place-items:center;padding:0;
+  background:#1b2a30;border:2px solid #34505a;color:var(--fg);box-shadow:0 3px 0 rgba(0,0,0,.45);cursor:pointer}
+.title-snd svg{width:22px;height:22px}
+.up-btns{display:flex;flex-direction:column;gap:6px;align-items:stretch}
+.up-btns .btn{padding:8px 10px;font-size:.9rem;white-space:nowrap}
+.up-btns .btn.mini{padding:4px 8px;font-size:.76rem;opacity:.9}
+.up-row.special{border-color:#a7792a;background:linear-gradient(170deg,#f1e2b8,#dcc08a)}
+.big-ic.sp{color:#f1c45a;font-size:1.5rem;background:#3a2410}
+.sp-note{background:#2a1a10;border:1px solid #a7792a;border-radius:8px;padding:8px 10px;font-size:.88rem;margin:0}
+/* ===== manuscript pages ===== */
+.page-wrap{align-items:stretch;gap:14px;padding-top:18px}
+.ms-page{position:relative;color:#2b1c12;padding:26px 22px 34px;border-radius:4px;
+  background:radial-gradient(ellipse at 15% 10%,rgba(255,255,255,.35),transparent 45%),radial-gradient(ellipse at 90% 95%,rgba(120,70,20,.28),transparent 55%),
+    radial-gradient(circle at 78% 22%,rgba(110,60,20,.12) 0 14%,transparent 15%),linear-gradient(172deg,#ece0c2,#d6c196);
+  box-shadow:0 10px 24px rgba(0,0,0,.55),inset 0 0 40px rgba(110,70,30,.4);border:1px solid #8a6a3c}
+.ms-page::before{content:'';position:absolute;left:14px;top:0;bottom:0;width:1px;background:rgba(160,60,40,.35)}
+.ms-page.turn{animation:pgturn .5s ease-out}
+@keyframes pgturn{from{opacity:0;transform:perspective(700px) rotateY(-14deg) translateX(20px)}to{opacity:1;transform:none}}
+.ms-date{font-family:var(--display);font-size:.8rem;letter-spacing:.06em;color:#7a4a22;margin:0 0 4px}
+.ms-title{font-family:var(--display);font-size:1.45rem;color:#2b1c12;margin:0 0 14px;line-height:1.3}
+.ms-body p{font-family:'Sarabun',serif;font-size:1.02rem;line-height:1.85;margin:0 0 12px;text-indent:1.6em;color:#2e2016}
+.ms-body p:first-child{text-indent:0}
+.ms-folio{position:absolute;right:16px;bottom:8px;margin:0;font-size:.74rem;color:#7a5a3a;font-style:italic}
+.ms-skip{align-self:center;color:var(--dim)}
+.ms-frag{display:block;font-family:'Sarabun',serif;font-style:italic;font-size:1.08rem;line-height:1.7;color:#e8dcc0;margin-bottom:10px}
+.ms-note{display:block;font-size:.9rem;color:var(--dim);margin-bottom:12px;border-left:2px solid #6a4a2a;padding-left:10px}
+.ms-hint{display:block;font-size:.84rem;color:var(--dim);opacity:.8}
+.cx-item.ms-item .cx-ico{font-family:var(--num);font-size:.85rem}
+
+#e-shards .shards,#e-shards .shards span{color:#2a5a86!important;text-shadow:none}
+
+/* hidden stars: still secret, but give a faint glint every ~10s */
+.hstar svg{width:12px;height:12px;opacity:.4;animation:starGlint 10s ease-in-out infinite}
+.hstar:nth-of-type(odd) svg{animation-delay:-4s}
+@keyframes starGlint{0%,90%,100%{opacity:.4;transform:none;filter:none}94%{opacity:1;transform:scale(1.7) rotate(36deg);filter:drop-shadow(0 0 6px #fff6c8)}}
+.hstar.got svg{animation:none}
+@media (prefers-reduced-motion:reduce){.hstar svg{animation:none;opacity:.55}}
+
+/* dice badges: lock icon in the corner, skill value on top, short names */
+.tray .die .lock{top:-7px!important;right:-5px!important;left:auto!important;bottom:auto!important;transform:none!important;width:22px;height:22px;border-radius:50%;
+  background:#e0b25a;color:#2b1c12;display:grid;place-items:center;box-shadow:0 2px 0 #6a4a1a,0 0 8px rgba(224,178,90,.6);z-index:3}
+.tray .die .lock svg{width:12px;height:12px}
+.tray .die .smark{top:-9px!important;font-size:.62rem!important;max-width:none;overflow:visible;background:#2a1a0c;border:1px solid #c79a3c;color:#f1c45a;padding:0 5px;border-radius:999px;z-index:2;cursor:help}
+.tray .die .nm{font-size:.62rem}
+.tray .die .smark{left:-5px!important;right:auto!important;transform:none!important}
+/* ===== 3D dice cubes ===== */
+.tray{--h:28px}
+.tray .die{perspective:520px}
+.tray .cube{position:relative;width:100%;max-width:60px;aspect-ratio:1;margin:0 auto;transform-style:preserve-3d;transition:transform .16s cubic-bezier(.2,1.4,.4,1)}
+.tray .cube .face{position:absolute;inset:0;width:100%!important;max-width:none;height:100%;margin:0;backface-visibility:hidden;-webkit-backface-visibility:hidden;transition:none}
+.tray .cube .face.front{transform:translateZ(var(--h))!important}
+.tray .cube .face.side{box-shadow:inset 0 2px 0 rgba(255,255,255,.12),inset 0 -6px 10px rgba(0,0,0,.35)!important;filter:brightness(.85)}
+.tray .cube .s1{transform:rotateY(90deg) translateZ(var(--h))}
+.tray .cube .s2{transform:rotateY(180deg) translateZ(var(--h))}
+.tray .cube .s3{transform:rotateY(-90deg) translateZ(var(--h))}
+.tray .cube .s4{transform:rotateX(90deg) translateZ(var(--h))}
+.tray .cube .s5{transform:rotateX(-90deg) translateZ(var(--h))}
+/* lift for held / hover moves to the cube */
+.tray .die.held .face,.tray .die:hover .face,.tray .die.held:hover .face{transform:none}
+.tray .die.held .cube{transform:translateY(-14px) translateZ(calc(var(--h) * -1))}
+.tray .die:hover:not(.frozen):not(.banished):not(.held) .cube{transform:translateY(-4px) translateZ(calc(var(--h) * -1))}
+.tray.rolling .die .face{animation:none!important}
+.tray.rolling .cube.spin{animation:cubeRoll .7s cubic-bezier(.18,.72,.32,1) both;animation-delay:var(--d,0ms)}
+@keyframes cubeRoll{
+  0%{transform:translateY(-34px) translateZ(calc(var(--h) * -1)) rotateX(var(--rx)) rotateY(var(--ry)) rotateZ(var(--rz)) scale(.82)}
+  70%{transform:translateY(2px) translateZ(calc(var(--h) * -1)) rotateX(calc(var(--rx) * .04)) rotateY(calc(var(--ry) * .04)) rotateZ(0deg) scale(1.04)}
+  85%{transform:translateY(-3px) translateZ(calc(var(--h) * -1)) scale(.98)}
+  100%{transform:translateZ(calc(var(--h) * -1))}}
+.tray .cube{transform:translateZ(calc(var(--h) * -1))}
+@media (prefers-reduced-motion:reduce){.tray.rolling .cube.spin{animation:none}}
+/* the result face still carries the box shadow so the die reads as a solid block */
+.tray .die.held .cube .face.front{box-shadow:0 6px 0 color-mix(in srgb,var(--fc) 35%,#000),0 0 0 3px var(--gold),0 18px 22px rgba(0,0,0,.55),0 0 22px rgba(230,185,79,.5)}
+.tray .cube{width:90%}
+.tray .die .nm{position:relative;margin-top:6px;transform:translateZ(0)}
+/* resting dice: tilt so the cube reads as a real die (top + side visible) */
+.tray{--tilt:rotateX(-20deg) rotateY(-24deg)}
+.tray .cube{transform:translateZ(calc(var(--h) * -1)) var(--tilt)}
+.tray .die.held .cube{transform:translateY(-14px) translateZ(calc(var(--h) * -1)) rotateX(-12deg) rotateY(-14deg)}
+.tray .die:hover:not(.frozen):not(.banished):not(.held) .cube{transform:translateY(-4px) translateZ(calc(var(--h) * -1)) var(--tilt)}
+@keyframes cubeRoll{
+  0%{transform:translateY(-34px) translateZ(calc(var(--h) * -1)) rotateX(var(--rx)) rotateY(var(--ry)) rotateZ(var(--rz)) scale(.82)}
+  70%{transform:translateY(2px) translateZ(calc(var(--h) * -1)) rotateX(-22deg) rotateY(-26deg) scale(1.04)}
+  85%{transform:translateY(-3px) translateZ(calc(var(--h) * -1)) rotateX(-19deg) rotateY(-23deg) scale(.98)}
+  100%{transform:translateZ(calc(var(--h) * -1)) var(--tilt)}}
+.tray .cube .face{border-radius:9px}
+.tray .cube .face.front{box-shadow:inset 0 2px 0 rgba(255,255,255,.18),inset 0 -5px 10px rgba(0,0,0,.3)!important}
+.tray .cube .face.side{filter:brightness(.62) saturate(.8)}
+.tray .cube .face.side b{opacity:.85}
+.tray .die{position:relative}
+.tray .die::after{content:'';position:absolute;left:14%;right:14%;top:calc(var(--h) * 2 - 2px);height:10px;border-radius:50%;background:radial-gradient(closest-side,rgba(0,0,0,.6),transparent);pointer-events:none;z-index:0}
+.tray .die.held::after{opacity:.45;transform:scale(.8) translateY(8px)}
+.tray .die .lock{right:-1px!important}
+.tray .die .smark{left:1px!important}
+
+/* drop the floor ellipse (it sat on top of the names); use a soft contact shadow on the cube instead */
+.tray .die::after{display:none}
+.tray .cube .face.front{box-shadow:inset 0 2px 0 rgba(255,255,255,.2),inset 0 -3px 6px rgba(0,0,0,.18),0 8px 10px -4px rgba(0,0,0,.55)!important}
+.tray .cube .face.side{filter:brightness(.72) saturate(.85)}
+/* your own HP / sanity, right above the dice */
+.me{display:flex;align-items:center;gap:8px;position:relative;z-index:2;margin-bottom:2px}
+.me-tag{font-family:var(--display);font-size:.78rem;color:#e8d2a4;background:#3a2412;border:1px solid #8a5a28;border-radius:999px;padding:1px 9px;flex:none}
+.me-bar{position:relative;flex:1;display:flex;align-items:center;gap:4px;padding:4px 9px;border-radius:9px;overflow:hidden;background:#140c08;border:1px solid #4a2e1a;font-family:var(--num);min-width:0}
+.me-bar i{position:absolute;left:0;bottom:0;height:3px;border-radius:0 3px 3px 0;transition:width .35s}
+.me-bar.hp i{background:#d8553e}.me-bar.sn i{background:#e0b84a}
+.me-bar .ic{width:16px;height:16px;flex:none}.me-bar.hp .ic{color:#e8705a}.me-bar.sn .ic{color:#e8c25a}
+.me-bar b{font-size:1.05rem;color:#f3e6c8}.me-bar small{font-size:.75rem;color:#a89070}
+.me-bar.low{border-color:#c0402a;animation:melow 1.2s ease-in-out infinite}
+@keyframes melow{50%{box-shadow:0 0 0 2px rgba(220,70,40,.35)}}
+.tray .die .nm{margin-top:11px}
+#s-battle .hud .stats{display:none!important}
+.tray .die .nm{margin-top:15px}
+/* perf: animating a filter on the big sigil repainted the whole altar every frame; animate opacity only */
+.sigil{animation:sigilGlow2 4s ease-in-out infinite;filter:drop-shadow(0 0 8px #ff7a20);will-change:opacity}
+@keyframes sigilGlow2{50%{opacity:.78}}
+.candle i{will-change:transform}
+/* setup: make the chosen bag / curse obvious */
+.setup-hint{font-size:.86rem;margin:-4px 0 2px}
+.pick{position:relative;cursor:pointer}
+.pick.on{border-color:#d08a2a!important;box-shadow:0 0 0 3px #d08a2a,0 4px 0 #2a1a0d,0 0 18px rgba(208,138,42,.55)!important}
+.pick.on::after{content:'✓ เลือกอยู่';position:absolute;top:-10px;right:10px;background:#d08a2a;color:#2b1c12;font-family:var(--display);font-size:.72rem;font-weight:700;padding:1px 9px;border-radius:999px}
+.pick:not(.on){opacity:.78}
+.nb{white-space:nowrap}

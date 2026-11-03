@@ -11,3 +11,23 @@
 ตัวละครและสถานที่อิงจากงานของ H.P. Lovecraft, Robert W. Chambers และ Ambrose Bierce ที่หมดลิขสิทธิ์แล้ว เนื้อเรื่องและข้อความในเกมเขียนขึ้นใหม่ทั้งหมด
 
 ภาพตัวละครและไอคอนเครื่องรางสร้างด้วย AI
+
+## สำหรับคนพัฒนา
+
+ไฟล์ที่แก้จริงอยู่ใน `src/` ส่วน `index.html` กับ `spr.js` ที่หน้าแรกของ repo เป็นไฟล์ที่สร้างจากคำสั่ง build ห้ามแก้ตรง ๆ
+
+```
+src/            โค้ดและข้อมูลเกม (game.html, data.js, relics.js, story.js ...)
+src/css/        สไตล์
+tools/build.py  รวมไฟล์ใน src/ เป็น index.html + spr.js
+tools/sim6.js   บอทเล่นเกมจำลอง ใช้ดูบาลานซ์
+tools/tune8.js  จูนตัวเลขศัตรูรายบทอัตโนมัติ
+tools/tests/    เทสต์เล่นทั้งเกมอัตโนมัติ
+tools/thaicheck.py  ตรวจคำภาษาไทยที่ไม่อยู่ในพจนานุกรม (ต้องลง pythainlp)
+```
+
+```
+npm install
+npm test          # build แล้วรันเทสต์ทั้งหมด
+npm run sim       # ดูบาลานซ์จากบอท
+```

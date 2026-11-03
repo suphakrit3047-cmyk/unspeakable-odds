@@ -1,0 +1,12 @@
+{
+  "name": "unspeakable-odds",
+  "private": true,
+  "scripts": {
+    "build": "python3 tools/build.py --single",
+    "test": "npm run build && node tools/tests/smoke4.js && node tools/tests/smoke6.js && node tools/tests/smoke8.js",
+    "sim": "node tools/sim6.js 1500"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}
