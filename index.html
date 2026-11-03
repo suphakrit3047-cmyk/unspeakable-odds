@@ -2221,11 +2221,11 @@ var DRAW = {
 };
 
 // ===== Sound: soft, quiet, synthesised with Web Audio (no files) =====
-// mode: 2 = sound + music, 1 = sound only, 0 = muted
+// mode: 1 = sound effects on, 0 = muted (background music removed: it was harsh)
 var SND = (function () {
   var ctx = null, master, sfx, mus, noiseBuf, musicNodes = null, bellTimer = 0;
-  var mode = 2;
-  try { var v = localStorage.getItem('abyss-dice-sound2'); if (v !== null) mode = +v; } catch (e) {}
+  var mode = 1;
+  try { var v = localStorage.getItem('abyss-dice-sound3'); if (v !== null) mode = +v ? 1 : 0; } catch (e) {}
   var ROOT = { tut: 98, c1: 87.3, c2: 73.4, c3: 82.4, c4: 65.4, c5: 55, c6: 92.5, c7: 61.7, c8: 69.3, az: 46.2, title: 55 };
   var MASTER = 0.32, MUSIC = 0.05;
   function init() {
@@ -2260,23 +2260,24 @@ var SND = (function () {
     if (!ctx || !musicNodes) return;
     mus.gain.setTargetAtTime(on ? MUSIC : 0, now(), 0.8);
   }
-  var LABEL = ['ปิดเสียง', 'เสียง: ไม่มีเพลง', 'เสียง: เปิด'];
+  var LABEL = ['ปิดเสียง', 'เสียง: เปิด'];
   var api = {
     get on() { return mode > 0; },
     get mode() { return mode; },
     get label() { return LABEL[mode]; },
     unlock: function () { init(); },
     toggle: function () {
-      mode = (mode + 2) % 3; // 2 -> 1 -> 0 -> 2
-      try { localStorage.setItem('abyss-dice-sound2', String(mode)); } catch (e) {}
-      if (init()) { master.gain.setTargetAtTime(mode ? MASTER : 0, now(), 0.05); setMusic(mode === 2); }
+      mode = mode ? 0 : 1;
+      try { localStorage.setItem('abyss-dice-sound3', String(mode)); } catch (e) {}
+      if (init()) master.gain.setTargetAtTime(mode ? MASTER : 0, now(), 0.05);
       return mode > 0;
     },
     play: function (name, arg) {
       if (!mode || !init()) return;
       var fn = SFX[name]; if (fn) try { fn(now(), arg || 0); } catch (e) {}
     },
-    music: function (key, boss) {
+    music: function () { return; },
+    _oldMusic: function (key, boss) {
       if (!init()) return;
       var root = ROOT[key] || 55, t = now();
       if (!musicNodes) {
@@ -2682,7 +2683,7 @@ function buy(id) {
   if (u.kind === 'bag') META.bag = id;
   metaSave(); SND.play('coin'); renderShop();
 }
-function paintSound() { document.querySelectorAll('.sndbtn').forEach(b => { b.innerHTML = SND.mode === 2 ? SPK_ON : SND.mode === 1 ? SPK_NOMUS : SPK_OFF; b.setAttribute('aria-label', SND.label + ' (กดเพื่อเปลี่ยน)'); b.title = SND.label; if (b.classList.contains('ghost')) b.innerHTML += ' ' + SND.label; }); }
+function paintSound() { document.querySelectorAll('.sndbtn').forEach(b => { b.innerHTML = SND.mode ? SPK_ON : SPK_OFF; b.setAttribute('aria-label', SND.label + ' (กดเพื่อเปลี่ยน)'); b.title = SND.label; if (b.classList.contains('ghost')) b.innerHTML += ' ' + SND.label; }); }
 const SPK_NOMUS = '<svg class="ic" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/></svg>';
 const SPK_ON = '<svg class="ic" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></svg>';
 const SPK_OFF = '<svg class="ic" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9l5 6M22 9l-5 6"/></svg>';
