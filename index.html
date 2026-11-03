@@ -770,6 +770,17 @@ body.sp-leave .splash{animation:spOut .38s ease-in forwards}
 .tray .die::after{display:none}
 .tray .cube .face.front{box-shadow:inset 0 2px 0 rgba(255,255,255,.2),inset 0 -3px 6px rgba(0,0,0,.18),0 8px 10px -4px rgba(0,0,0,.55)!important}
 .tray .cube .face.side{filter:brightness(.72) saturate(.85)}
+/* your own HP / sanity, right above the dice */
+.me{display:flex;align-items:center;gap:8px;position:relative;z-index:2;margin-bottom:2px}
+.me-tag{font-family:var(--display);font-size:.78rem;color:#e8d2a4;background:#3a2412;border:1px solid #8a5a28;border-radius:999px;padding:1px 9px;flex:none}
+.me-bar{position:relative;flex:1;display:flex;align-items:center;gap:4px;padding:4px 9px;border-radius:9px;overflow:hidden;background:#140c08;border:1px solid #4a2e1a;font-family:var(--num);min-width:0}
+.me-bar i{position:absolute;left:0;bottom:0;height:3px;border-radius:0 3px 3px 0;transition:width .35s}
+.me-bar.hp i{background:#d8553e}.me-bar.sn i{background:#e0b84a}
+.me-bar .ic{width:16px;height:16px;flex:none}.me-bar.hp .ic{color:#e8705a}.me-bar.sn .ic{color:#e8c25a}
+.me-bar b{font-size:1.05rem;color:#f3e6c8}.me-bar small{font-size:.75rem;color:#a89070}
+.me-bar.low{border-color:#c0402a;animation:melow 1.2s ease-in-out infinite}
+@keyframes melow{50%{box-shadow:0 0 0 2px rgba(220,70,40,.35)}}
+.tray .die .nm{margin-top:11px}
 </style>
 </head>
 <body>
@@ -854,6 +865,7 @@ body.sp-leave .splash{animation:spOut .38s ease-in forwards}
     <path id="sigil-ring" d="M100 13 a87 87 0 1 1 -0.1 0" fill="none" stroke="none"/>
   </svg>
   <span class="candle c1"><i></i></span><span class="candle c2"><i></i></span><span class="candle c3"><i></i></span><span class="candle c4"><i></i></span>
+  <div class="me" id="me" aria-label="สถานะของคุณ"></div>
   <div class="chips" id="pstat"></div>
   <div class="tray" id="tray"></div>
   <div class="combo-banner" id="combo" aria-live="polite" hidden></div>
@@ -2948,7 +2960,7 @@ function rollOne(r) {
 function startTurn() {
   battle.turn = (battle.turn || 0) + 1;
   if (battle.bleed > 0) {
-    run.hp = Math.max(0, run.hp - battle.bleed); log(`เลือดไหล −${battle.bleed}`); floatNum('.stats .hp', '−' + battle.bleed + ' เลือดไหล', 'hit'); SND.play('hurt', battle.bleed);
+    run.hp = Math.max(0, run.hp - battle.bleed); log(`เลือดไหล −${battle.bleed}`); floatNum('#me-hp', '−' + battle.bleed + ' เลือดไหล', 'hit'); SND.play('hurt', battle.bleed);
     battle.bleed--;
     if (run.hp <= 0) { render(false); return setTimeout(() => lose('body'), 500); }
   }
@@ -3044,15 +3056,15 @@ function applyResult(T) {
     if (crit) quake(top >= 3 ? 2 : 1);
     parts.push(`โจมตี ${s.atk}` + (absorbed ? ` (โล่กัน ${absorbed})` : ''));
     const el = $('#enemy'); el.classList.remove('hit'); void el.offsetWidth; el.classList.add('hit');
-    if (dealt > 0 && e.trait && e.trait.key === 'thorns' && !hasRelic(run.relics, 'salt')) { run.hp = Math.max(0, run.hp - e.trait.v); parts.push(`โดนหนามพิษ −${e.trait.v}`); setTimeout(() => { floatNum('.stats .hp', '−' + e.trait.v + ' หนาม', 'hit'); SND.play('hurt', e.trait.v); }, 300); }
+    if (dealt > 0 && e.trait && e.trait.key === 'thorns' && !hasRelic(run.relics, 'salt')) { run.hp = Math.max(0, run.hp - e.trait.v); parts.push(`โดนหนามพิษ −${e.trait.v}`); setTimeout(() => { floatNum('#me-hp', '−' + e.trait.v + ' หนาม', 'hit'); SND.play('hurt', e.trait.v); }, 300); }
   }
   if (!s.atk && e.trait && e.trait.key === 'vengeful' && e.hp > 0) { e.str += e.trait.v; parts.push(`${e.name}แค้น พลัง +${e.trait.v}`); setTimeout(() => floatNum('#enemy', 'แค้น +' + e.trait.v, 'hit'), 250); }
   if (s.blk) { battle.pBlock += s.blk; parts.push(`โล่ ${s.blk}`); setTimeout(() => SND.play('block'), 120); }
   if (s.poison) { e.poison += s.poison; parts.push(`พิษ +${s.poison}`); setTimeout(() => SND.play('poison'), 180); }
   if (s.weak) { e.weak += s.weak; parts.push(`อ่อนแรง ${s.weak} เทิร์น`); }
-  if (s.heal) { run.hp = Math.min(run.maxHp, run.hp + s.heal); parts.push(`ฟื้น ${s.heal}`); floatNum('.stats .hp', '+' + s.heal, 'heal'); setTimeout(() => SND.play('heal'), 220); }
+  if (s.heal) { run.hp = Math.min(run.maxHp, run.hp + s.heal); parts.push(`ฟื้น ${s.heal}`); floatNum('#me-hp', '+' + s.heal, 'heal'); setTimeout(() => SND.play('heal'), 220); }
   if (s.san) { run.san = Math.min(run.maxSan, run.san + s.san); parts.push(`สติ +${s.san}`); setTimeout(() => SND.play('san'), 260); }
-  if (s.mad) { run.san = Math.max(0, run.san - s.mad); parts.push(`สติ −${s.mad}`); floatNum('#sn-bar', '−' + s.mad, 'mad'); setTimeout(() => SND.play('mad'), 200); }
+  if (s.mad) { run.san = Math.max(0, run.san - s.mad); parts.push(`สติ −${s.mad}`); floatNum('#me-sn', '−' + s.mad, 'mad'); setTimeout(() => SND.play('mad'), 200); }
   if (s.blk) floatNum('#pstat', '+' + s.blk + ' โล่', 'blk');
   log('คุณ: ' + (parts.join(' · ') || 'ไม่มีผลอะไรเลย'));
   coachEvent('resolve');
@@ -3095,13 +3107,13 @@ function enemyTurn() {
       battle.pBlock -= absorbed; run.hp = Math.max(0, run.hp - taken);
       SND.play(taken ? 'hurt' : 'block', taken);
       if (taken >= 12) quake(1);
-      if (taken) { floatNum('.stats .hp', '−' + taken, 'hit'); const sb = $('#s-battle'); sb.classList.remove('hurt'); void sb.offsetWidth; sb.classList.add('hurt'); }
+      if (taken) { floatNum('#me-hp', '−' + taken, 'hit'); const sb = $('#s-battle'); sb.classList.remove('hurt'); void sb.offsetWidth; sb.classList.add('hurt'); }
       if (p.t === 'drain') { e.hp = Math.min(e.maxHp, e.hp + taken); parts.push(`ดูดเลือด ${dmg}` + (taken ? ` ฟื้น ${taken}` : ' (โล่กันหมด)')); }
       else parts.push(`โจมตี ${dmg}` + (absorbed ? ` (โล่กัน ${absorbed})` : ''));
       if (taken > 0 && tr && tr.key === 'thief' && run.coins > 0 && !hasRelic(run.relics, 'salt')) { const st = Math.min(run.coins, tr.v); run.coins -= st; parts.push(`ขโมยเงิน ${st}`); setTimeout(() => floatNum('#coins', '−' + st + ' ◉', 'hit'), 250); }
       if (taken > 0 && tr && tr.key === 'bleed' && !hasRelic(run.relics, 'salt')) { battle.bleed += tr.v; parts.push(`เลือดไหล +${tr.v}`); }
     } else if (p.t === 'blk') { e.block += p.v; parts.push(`ตั้งโล่ ${p.v}`); }
-    else if (p.t === 'mad') { run.san = Math.max(0, run.san - p.v); parts.push(`กัดกินสติ ${p.v}`); floatNum('#sn-bar', '−' + p.v, 'mad'); SND.play('mad'); }
+    else if (p.t === 'mad') { run.san = Math.max(0, run.san - p.v); parts.push(`กัดกินสติ ${p.v}`); floatNum('#me-sn', '−' + p.v, 'mad'); SND.play('mad'); }
     else if (p.t === 'str') { e.str += p.v; parts.push(`เพิ่มพลัง +${p.v}`); }
     else if (p.t === 'freeze') { battle.freezeNext = Math.min(run.dice.length, p.v); parts.push(`ตรึงเต๋า ${p.v} ลูกเทิร์นหน้า`); coachEvent('freeze'); }
     else if (p.t === 'daze') { battle.dazeNext = p.v; parts.push('ทำให้คุณมึน'); coachEvent('daze'); }
@@ -3109,7 +3121,7 @@ function enemyTurn() {
   e.t++;
   if (tr && tr.key === 'harden') { e.block += tr.v; parts.push(`เปลือกแข็ง โล่ +${tr.v}`); setTimeout(() => floatNum('#enemy', '+' + tr.v + ' โล่', 'blk'), 200); }
   if (tr && tr.key === 'grow') { e.str += tr.v; parts.push(`โตขึ้น พลัง +${tr.v}`); setTimeout(() => floatNum('#enemy', 'พลัง +' + tr.v, 'hit'), 200); }
-  if (tr && tr.key === 'dread') { run.san = Math.max(0, run.san - tr.v); parts.push(`ความหลอน สติ −${tr.v}`); floatNum('#sn-bar', '−' + tr.v, 'mad'); }
+  if (tr && tr.key === 'dread') { run.san = Math.max(0, run.san - tr.v); parts.push(`ความหลอน สติ −${tr.v}`); floatNum('#me-sn', '−' + tr.v, 'mad'); }
   if (e.aura) { run.san = Math.max(0, run.san - e.aura); parts.push(`สัญลักษณ์สีเหลืองกัดกินสติ ${e.aura}`); }
   if (e.wave && e.t % e.wave === 0) { battle.freezeNext = run.dice.length; parts.push('คลื่นยักษ์! ตรึงเต๋าทั้งถุงเทิร์นหน้า'); }
   if (e.weak > 0) e.weak--;
@@ -3484,7 +3496,11 @@ function render(rolled) {
       ${enraged() ? `<p class="btrait hot" data-tip="${escTip(`<b>นิสัย · ${e.trait.name}</b>${e.trait.text}`)}"><b>คลั่งแล้ว!</b> ตีแรงขึ้น 50%</p>` : traitBox(e.trait)}
       <div class="intent ${danger ? 'danger' : ''}"><span class="dim">กำลังจะ</span>${it}${danger ? '<span class="dz">หนัก!</span>' : ''}</div>
     </div>`;
-  // player status
+  // player status, right above your dice
+  const pc = (a, b) => Math.max(0, Math.min(100, 100 * a / b));
+  $('#me').innerHTML = `<span class="me-tag">คุณ</span>
+    <span class="me-bar hp ${run.hp <= run.maxHp * 0.3 ? 'low' : ''}" id="me-hp" data-tip="${escTip('<b>เลือดของคุณ</b>หมดเมื่อไรคือแพ้ ศัตรูตีทะลุโล่มาเท่าไร เลือดลดเท่านั้น')}">${icon('heal')}<b>${run.hp}</b><small>/${run.maxHp}</small><i style="width:${pc(run.hp, run.maxHp)}%"></i></span>
+    <span class="me-bar sn ${run.san <= 8 ? 'low' : ''}" id="me-sn" data-tip="${escTip('<b>สติของคุณ</b>เหลือ 8 หรือต่ำกว่า เต๋าจะเริ่มบิดเบือน หมดเมื่อไรคือแพ้')}">${icon('san')}<b>${run.san}</b><small>/${run.maxSan}</small><i style="width:${pc(run.san, run.maxSan)}%"></i></span>`;
   const pst = [];
   if (battle.pBlock) pst.push(`<span class="chip" data-tip="${escTip('<b>โล่ของคุณ</b>กันการโจมตีของศัตรูในเทิร์นนี้')}" style="color:var(--steel)">${icon('blk')}โล่ของคุณ ${battle.pBlock}</span>`);
   if (battle.freezeNext) pst.push(`<span class="chip" data-tip="${tipFoe('freeze')}" style="color:var(--steel)">${icon('freeze')}เทิร์นหน้าโดนตรึง ${battle.freezeNext}</span>`);
