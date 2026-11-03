@@ -123,6 +123,13 @@ function resumeRun() {
   if (sv.screen === 'battle' && sv.battle) {
     battle = sv.battle;
     battle.busy = false;
+    const e = battle.e;
+    if (!e.chs) {
+      // saved before the rules moved to src/rules: fill in what phase 2 needs
+      e.chs = { atkMul: run.ch.atkMul, atkAdd: run.ch.atkAdd, hpMul: run.ch.hpMul };
+      e.atkCurse = curseMod(run.curse || 0).atk;
+    }
+    battle.turn = battle.turn || 1;
     show('battle');
     render(false);
   } else if (sv.screen === 'reward') showReward(true);

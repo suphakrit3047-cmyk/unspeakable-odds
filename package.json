@@ -3,12 +3,12 @@
   "private": true,
   "scripts": {
     "build": "python3 tools/build.py --single",
-    "test": "npm run build && node tools/tests/full-run.test.js && node tools/tests/mechanics.test.js && node tools/tests/content.test.js",
+    "test": "node tools/tests/rules.test.js && npm run build && node tools/tests/full-run.test.js && node tools/tests/mechanics.test.js && node tools/tests/content.test.js",
     "sim": "node tools/sim.js 1500",
     "tune": "node tools/tune.js",
     "thai-check": "python3 tools/thaicheck.py",
     "artifact": "python3 tools/build.py --artifact",
-    "format": "prettier --write \"src/js/*.js\" \"src/css/*.css\" \"tools/**/*.js\""
+    "format": "prettier --write \"src/js/*.js\" \"src/rules/*.js\" \"src/css/*.css\" \"tools/**/*.js\""
   },
   "devDependencies": {
     "jsdom": "^24.1.3",

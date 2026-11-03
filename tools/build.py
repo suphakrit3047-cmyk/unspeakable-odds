@@ -15,8 +15,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CSS = ['1-base', '2-features', '3-pixel-theme', '4-parchment-theme', '5-latest']
 
-# game content, shared with the balance sim (tools/sim.js)
-DATA = ['data/data.js', 'data/relics.js', 'data/lore.js', 'data/story.js']
+# game content + rules, shared with the balance sim (tools/sim.js)
+DATA = ['data/data.js', 'data/relics.js', 'data/lore.js', 'data/story.js', 'rules/rules.js']
 
 JS = [
     'portraits',   # canvas drawing of monsters and relic icons
@@ -38,8 +38,9 @@ JS = [
     'end',         # run end screen
     'coach',       # tutorial coach
     'render',      # battle screen rendering
-    'input',       # button wiring
     'tooltips',    # hover / press-and-hold tips
+    'input',       # help modal, glossary, all button wiring
+    'boot',        # show the first screen
 ]
 
 FONTS = ('<link rel="preconnect" href="https://fonts.googleapis.com">\n'
@@ -60,7 +61,8 @@ def write(p, text):
 
 
 def strip_node_export(js):
-    """data files end with a module.exports line for the Node sim; the browser doesn't need it."""
+    """Shared files carry Node-only lines for the sim (require at the top, module.exports at the end)."""
+    js = re.sub(r'// <node-only>.*?// </node-only>\n', '', js, flags=re.S)
     i = js.find("if (typeof module !== 'undefined')")
     return js[:i] if i >= 0 else js
 

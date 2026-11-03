@@ -4,30 +4,13 @@ var SND = (function () {
   var ctx = null,
     master,
     sfx,
-    mus,
-    noiseBuf,
-    musicNodes = null,
-    bellTimer = 0;
+    noiseBuf;
   var mode = 1;
   try {
     var v = localStorage.getItem('abyss-dice-sound3');
     if (v !== null) mode = +v ? 1 : 0;
   } catch (e) {}
-  var ROOT = {
-    tut: 98,
-    c1: 87.3,
-    c2: 73.4,
-    c3: 82.4,
-    c4: 65.4,
-    c5: 55,
-    c6: 92.5,
-    c7: 61.7,
-    c8: 69.3,
-    az: 46.2,
-    title: 55,
-  };
-  var MASTER = 0.32,
-    MUSIC = 0.05;
+  var MASTER = 0.32;
   function init() {
     if (ctx) {
       if (ctx.state === 'suspended') ctx.resume();
@@ -56,9 +39,6 @@ var SND = (function () {
     sfx = ctx.createGain();
     sfx.gain.value = 0.6;
     sfx.connect(comp);
-    mus = ctx.createGain();
-    mus.gain.value = 0;
-    mus.connect(comp);
     noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 1.0, ctx.sampleRate);
     var ch = noiseBuf.getChannelData(0);
     for (var i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
@@ -98,10 +78,6 @@ var SND = (function () {
     o.start(t0);
     o.stop(t0 + dur + 0.05);
   }
-  function setMusic(on) {
-    if (!ctx || !musicNodes) return;
-    mus.gain.setTargetAtTime(on ? MUSIC : 0, now(), 0.8);
-  }
   var LABEL = ['ปิดเสียง', 'เสียง: เปิด'];
   var api = {
     get on() {
@@ -131,61 +107,6 @@ var SND = (function () {
         try {
           fn(now(), arg || 0);
         } catch (e) {}
-    },
-    music: function () {
-      return;
-    },
-    _oldMusic: function (key, boss) {
-      if (!init()) return;
-      var root = ROOT[key] || 55,
-        t = now();
-      if (!musicNodes) {
-        var lp = ctx.createBiquadFilter();
-        lp.type = 'lowpass';
-        lp.frequency.value = 400;
-        lp.Q.value = 0.7;
-        lp.connect(mus);
-        var oscs = [
-          [1, 0.5],
-          [1.5, 0.25],
-          [2.002, 0.18],
-        ].map(function (o) {
-          var os = ctx.createOscillator();
-          os.type = 'sine';
-          os.frequency.value = root * o[0];
-          var g = ctx.createGain();
-          g.gain.value = o[1];
-          os.connect(g);
-          g.connect(lp);
-          os.start();
-          return { os: os, mul: o[0] };
-        });
-        musicNodes = { oscs: oscs, lp: lp, root: root };
-        setMusic(mode === 2);
-        var bell = function () {
-          if (mode === 2 && ctx.state === 'running') {
-            var scale = [2, 2.4, 3, 3.6, 4],
-              f = musicNodes.root * scale[Math.floor(Math.random() * scale.length)],
-              b = now();
-            var o = ctx.createOscillator();
-            o.type = 'sine';
-            o.frequency.value = f;
-            var g = ctx.createGain();
-            env(g, b, 0.05, 0.25, 4);
-            o.connect(g);
-            g.connect(mus);
-            o.start(b);
-            o.stop(b + 4.2);
-          }
-          bellTimer = setTimeout(bell, 9000 + Math.random() * 9000);
-        };
-        bellTimer = setTimeout(bell, 6000);
-      }
-      musicNodes.root = root;
-      musicNodes.oscs.forEach(function (o) {
-        o.os.frequency.setTargetAtTime(root * o.mul, t, 1.5);
-      });
-      musicNodes.lp.frequency.setTargetAtTime(boss ? 650 : 400, t, 1.5);
     },
   };
   var SFX = {

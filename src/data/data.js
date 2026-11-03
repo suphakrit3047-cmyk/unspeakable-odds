@@ -307,4 +307,4 @@ function computeTally(rolls, ctx) {
 }
 function bagHas(dice, flag) { return dice.some(function (id) { return SKILLS[id] && SKILLS[id][flag]; }); }
 
-if (typeof module !== 'undefined') module.exports = { scaleFoePart: scaleFoePart, TRAITS: TRAITS, traitOf: traitOf, DICE: DICE, FOES: FOES, CHAPTERS: CHAPTERS, F: F, SKILLS: SKILLS, computeTally: computeTally, bagHas: bagHas, faceScore: faceScore, LOCKED_START: LOCKED_START, COMBO_MULT: COMBO_MULT };
+if (typeof module !== 'undefined') module.exports = { scaleFoePart: scaleFoePart, TRAITS: TRAITS, traitOf: traitOf, DICE: DICE, FOES: FOES, CHAPTERS: CHAPTERS, F: F, SKILLS: SKILLS, computeTally: computeTally, bagHas: bagHas, faceScore: faceScore, LOCKED_START: LOCKED_START, COMBO_MULT: COMBO_MULT, curseMod: curseMod };

@@ -1,78 +1,37 @@
 /* ---------- events ---------- */
+// wraps RULES.eventApi: same state changes, plus the text, sound and codex entry the game shows
 const evApi = {
   giveRelic(rar) {
-    if (run.relics.length >= relicMax(run)) {
-      run.coins += 4;
-      return 'ช่องเครื่องรางเต็ม ได้เงิน +4 แทน';
-    }
-    let pool = RELIC_KEYS.filter(k => !hasRelic(run.relics, k) && (!rar || RELICS[k].rar === rar));
-    if (!pool.length) pool = RELIC_KEYS.filter(k => !hasRelic(run.relics, k));
-    const id = pool[R(pool.length)];
-    run.relics.push({ id, n: 0 });
+    const r = RULES.eventApi(run).giveRelic(rar);
+    if (r.full) return 'ช่องเครื่องรางเต็ม ได้เงิน +4 แทน';
     SND.play('coin');
-    cxSee('r:' + id);
-    return `<span class="ri-line">${relicIcon(id)}<span>ได้เครื่องราง <b>${RELICS[id].name}</b>: ${RELICS[id].text}</span></span>`;
+    cxSee('r:' + r.id);
+    return `<span class="ri-line">${relicIcon(r.id)}<span>ได้เครื่องราง <b>${RELICS[r.id].name}</b>: ${RELICS[r.id].text}</span></span>`;
   },
   sellWeakest(v) {
-    const sc = id => DICE[id].faces.reduce((a, f) => a + faceScore(f), 0) + (SKILLS[id] ? 3 : 0);
-    let wi = 0;
-    run.dice.forEach((d, i) => {
-      if (sc(d) < sc(run.dice[wi])) wi = i;
-    });
-    const [gone] = run.dice.splice(wi, 1);
-    run.coins += v;
-    return `ขาย${DICE[gone].name}ไป ได้เงิน +${v}`;
+    const r = RULES.eventApi(run).sellWeakest(v);
+    return `ขาย${DICE[r.gone].name}ไป ได้เงิน +${v}`;
   },
   upgradeRandom(n, steps) {
-    steps = steps || 1;
-    run.ups = run.ups || {};
-    const kinds = [...new Set(run.dice)]
-      .filter(id => upLv(id) < UP_MAX)
-      .sort(() => Math.random() - 0.5)
-      .slice(0, n);
-    if (!kinds.length) {
-      run.coins += 4;
-      return 'อสูรทุกตัวแข็งแกร่งสุดแล้ว ได้เงิน +4 แทน';
-    }
-    kinds.forEach(id => {
-      run.ups[id] = Math.min(UP_MAX, upLv(id) + steps);
-    });
+    const r = RULES.eventApi(run).upgradeRandom(n, steps);
+    if (r.none) return 'อสูรทุกตัวแข็งแกร่งสุดแล้ว ได้เงิน +4 แทน';
     SND.play('combo', 1);
-    return `ปลุกพลัง ${kinds.map(id => `<b>${DICE[id].name}</b>`).join(', ')} +${steps} ขั้น ทุกหน้าแรงขึ้น`;
+    return `ปลุกพลัง ${r.kinds.map(id => `<b>${DICE[id].name}</b>`).join(', ')} +${r.steps} ขั้น ทุกหน้าแรงขึ้น`;
   },
   upgradeAll() {
-    run.ups = run.ups || {};
-    [...new Set(run.dice)].forEach(id => {
-      run.ups[id] = Math.min(UP_MAX, upLv(id) + 1);
-    });
+    RULES.eventApi(run).upgradeAll();
     SND.play('combo', 2);
     return 'ดวงดาวส่องลงมา อสูรทุกชนิดในถุงปลุกพลัง +1 ขั้น';
   },
   tradeUp() {
-    const sc = id => DICE[id].faces.reduce((a, f) => a + faceScore(f), 0) + (SKILLS[id] ? 3 : 0);
-    let wi = 0;
-    run.dice.forEach((d, i) => {
-      if (sc(d) < sc(run.dice[wi])) wi = i;
-    });
-    const gone = run.dice[wi],
-      t = Math.min(3, DICE[gone].tier + 1),
-      lk = lockedDice();
-    const pool = Object.keys(DICE).filter(k => DICE[k].tier === t && !lk.includes(k) && k !== gone);
-    if (!pool.length) {
-      run.coins += 6;
-      return 'กูลไม่มีอะไรดีกว่าให้แลก มันยื่นเหรียญให้ 6 แทน';
-    }
-    const nw = pool[R(pool.length)];
-    run.dice[wi] = nw;
-    cxSee('d:' + nw);
-    return `กูลรับ${DICE[gone].name}ไป แล้วส่ง <b>${DICE[nw].name}</b> ให้คุณแทน`;
+    const r = RULES.eventApi(run, lockedDice()).tradeUp();
+    if (r.none) return 'กูลไม่มีอะไรดีกว่าให้แลก มันยื่นเหรียญให้ 6 แทน';
+    cxSee('d:' + r.nw);
+    return `กูลรับ${DICE[r.gone].name}ไป แล้วส่ง <b>${DICE[r.nw].name}</b> ให้คุณแทน`;
   },
   giveDie(id) {
-    if (run.dice.length >= 6) {
-      run.coins += 4;
-      return 'ถุงเต็มแล้ว แมวเลยคาบเหรียญมาให้แทน เงิน +4';
-    }
-    run.dice.push(id);
+    const r = RULES.eventApi(run).giveDie(id);
+    if (r.full) return 'ถุงเต็มแล้ว แมวเลยคาบเหรียญมาให้แทน เงิน +4';
     cxSee('d:' + id);
     return `${DICE[id].name}เข้ามาอยู่ในถุงของคุณ`;
   },

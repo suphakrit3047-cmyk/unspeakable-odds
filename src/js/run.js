@@ -80,8 +80,7 @@ function interScreen(resumed) {
     nextI = run.nextI,
     nx = CHAPTERS[nextI];
   if (!resumed) {
-    run.hp = Math.min(run.maxHp, run.hp + REST.hp);
-    run.san = Math.min(run.maxSan, run.san + REST.san);
+    RULES.restBetween(run);
     const pos = RUN_ORDER.indexOf(run.ci);
     if (pos > REC.best) {
       REC.best = pos;
@@ -121,28 +120,24 @@ function onward() {
     beginStage();
   });
 }
+// labels for the three foe choices; hp and coin numbers are in RULES.ECON.rank
 const RANK = {
   1: {
     l: 'ง่าย',
     c: 'var(--verd)',
-    hp: 1,
-    coin: 1,
     reward: 'อสูรระดับต่ำกว่าปกติ 2 ตัวให้เลือก 1 · เลือด +3 · เงิน 1',
   },
-  2: { l: 'ปกติ', c: 'var(--steel)', hp: 1, coin: 2, reward: 'อสูร 3 ตัวให้เลือก 1 · เงิน 2' },
+  2: { l: 'ปกติ', c: 'var(--steel)', reward: 'อสูร 3 ตัวให้เลือก 1 · เงิน 2' },
   3: {
     l: 'อันตราย',
     c: 'var(--blood)',
-    hp: 0.85,
-    coin: 4,
     reward: 'อสูรระดับสูงขึ้น เลือกได้ 2 ตัว · เลือด +5 · สติ +2 · เงิน 4',
   },
 };
-const WIN_HEAL = 3,
-  WIN_SAN = 3,
-  BOSS_COIN = 6,
-  BOSS_MAXHP = 5,
-  REST = { hp: 10, san: 4 };
+const WIN_HEAL = RULES.ECON.winHeal,
+  WIN_SAN = RULES.ECON.winSan,
+  BOSS_MAXHP = RULES.ECON.bossMaxHp,
+  REST = RULES.ECON.rest;
 const isBossStage = () => run.ch.pool && run.stage === stagesOf(run.ch) - 1;
 function beginStage() {
   const ch = run.ch;
@@ -157,32 +152,10 @@ function beginStage() {
   }
   showChoice();
 }
-function foeHp(key, rank) {
-  const ch = run.ch,
-    E = FOES[key];
-  return Math.round(
-    E.hp *
-      ch.hpMul *
-      (1 + 0.04 * run.stage) *
-      (E.boss ? ch.bossHp || 1 : ch.pool ? RANK[rank].hp : 1) *
-      curseMod(run.curse || 0).hp
-  );
-}
-function scalePart(p, hpScale) {
-  return scaleFoePart(p, run.ch, curseMod(run.curse || 0).atk, hpScale);
-}
-function foeTrait(key, maxHp) {
-  return FOES[key].boss || run.ch.tut
-    ? null
-    : traitOf(key, { L: run.ch.level || 0, maxHp, atkMul: run.ch.atkMul || 1 });
-}
-function bossNums(E, hp) {
-  const m = run.ch.atkMul || 1;
-  return {
-    feast: E.feast ? Math.round(E.feast * m) : 0,
-    regen: E.regen ? Math.max(1, Math.round(((E.regen * hp) / E.hp) * 0.7)) : 0,
-  };
-}
+// numbers the choose-a-foe screen shows (the battle itself builds the foe in RULES.newFoe)
+const foeHp = (key, rank) => RULES.foeHp(run.ch, run.stage, key, rank, run.curse);
+const scalePart = (p, hpScale) => scaleFoePart(p, run.ch, curseMod(run.curse || 0).atk, hpScale);
+const foeTrait = (key, maxHp) => RULES.foeTrait(run.ch, key, maxHp);
 function fillSkill(text, nums) {
   return text.replace(/\{(\w+)\}/g, (_, k) =>
     nums && nums[k] != null ? nums[k] : k === 'feast' ? 3 : k === 'regen' ? 4 : '?'
@@ -199,9 +172,7 @@ function traitBox(tr) {
     ? `<p class="btrait" data-tip="${escTip(`<b>นิสัย · ${tr.name}</b>${tr.text}`)}"><b>นิสัย · ${tr.name}</b> ${tr.text}</p>`
     : '';
 }
-function restAmt() {
-  return curseMod(run.curse || 0).rest;
-}
+const restAmt = () => RULES.restPickHp(run.curse);
 function intentIcons(intents, hpScale) {
   return intents
     .map(it =>

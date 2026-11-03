@@ -43,7 +43,6 @@ function show(id) {
     'rshop',
   ].forEach(s => ($('#s-' + s).hidden = s !== id));
   window.scrollTo(0, 0);
-  if (typeof musicFor === 'function') musicFor();
   if (typeof paintRunbar === 'function') paintRunbar(id);
 }
 const RUNBAR_ON = ['choose', 'reward', 'event', 'rshop', 'inter'];
@@ -118,10 +117,7 @@ function sigil(name, col) {
 function upLv(id) {
   return (run && run.ups && run.ups[id]) || 0;
 }
-function upFace(f, id) {
-  const lv = upLv(id);
-  return lv && f.t !== 'none' && f.t !== 'mad' ? { ...f, v: f.v + lv } : f;
-}
+const upFace = (f, id) => RULES.upFace(f, id, run || {});
 function dieCard(id, btnLabel, btnAttr) {
   const d = DICE[id],
     lv = upLv(id);

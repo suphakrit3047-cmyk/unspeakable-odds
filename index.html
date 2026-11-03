@@ -4581,6 +4581,556 @@ var EVENT_STORY = {
   stars: 'คืนนั้นดวงดาวเรียงตัวถูกตำแหน่ง สาวกลัทธิหนีไปหมดแล้ว ทิ้งแท่นพิธีที่จุดไฟไว้ เหมือนรู้ว่าผมจะมา',
   colourwell: 'บ่อน้ำกลางหุบเขาที่ตายแล้วเรืองแสงเป็นสีที่ไม่มีชื่อเรียกในภาษาไหน ต้นไม้รอบ ๆ แห้งตายเป็นสีเทา ดินร่วนเหมือนขี้เถ้า',
 };
+// ===== Game rules: one copy, used by the game (src/js) and the balance bot (tools/sim.js) =====
+// Pure state changes only. Nothing here touches the page: each step returns a list of
+// events ({ k: 'hit', ... }) that the game turns into log lines, numbers and sounds.
+//
+// State shapes
+//   run    : { hp, maxHp, san, maxSan, coins, dice: [id], relics: [{ id, n, off }], ups: { id: level }, curse }
+//   battle : { e (foe), rolls: [{ id, face, held, frozen, banished, fresh }], rerolls, bonusRR, pBlock,
+//              bleed, freezeNext, dazeNext, turn }
+//   ch     : a chapter from CHAPTERS
+
+
+var RULES = (function () {
+  const R = n => Math.floor(Math.random() * n);
+  const shuffled = a => a.sort(() => Math.random() - 0.5);
+
+  /* ---------- numbers ---------- */
+  const ECON = {
+    rank: { 1: { hp: 1, coin: 1 }, 2: { hp: 1, coin: 2 }, 3: { hp: 0.85, coin: 4 } },
+    stageHp: 0.04, // foe hp +4% per stage inside a chapter
+    cursedFoeHp: 1.25, // an event can curse the next foe
+    bossCoin: 6,
+    bossMaxHp: 5,
+    winHeal: 3,
+    winSan: 3,
+    rest: { hp: 10, san: 4 }, // between chapters
+    restPickSan: 5, // "rest by the fire" instead of taking a die
+    potion: { base: 3, step: 2, heal: 12 }, // price rises each bottle in one shop visit
+    incense: { base: 3, step: 2, san: 5 },
+    rerolls: 2,
+    madAt: 8, // sanity at or below this distorts faces
+    distort: 0.3,
+  };
+  // the silver key relic takes 1 off every shop price
+  const shopPrice = (n, relics) => (n <= 0 ? 0 : Math.max(1, n - (hasRelic(relics, 'key') ? 1 : 0)));
+  const potionCost = (n, relics) => shopPrice(ECON.potion.base + ECON.potion.step * n, relics);
+  const incenseCost = (n, relics) => shopPrice(ECON.incense.base + ECON.incense.step * n, relics);
+  const restPickHp = curse => curseMod(curse || 0).rest;
+
+  /* ---------- foes ---------- */
+  function foeHp(ch, stage, key, rank, curse) {
+    const E = FOES[key];
+    return Math.round(
+      E.hp *
+        ch.hpMul *
+        (1 + ECON.stageHp * stage) *
+        (E.boss ? ch.bossHp || 1 : ch.pool ? ECON.rank[rank].hp : 1) *
+        curseMod(curse || 0).hp
+    );
+  }
+  function bossNums(ch, E, hp) {
+    const m = ch.atkMul || 1;
+    return {
+      feast: E.feast ? Math.round(E.feast * m) : 0,
+      regen: E.regen ? Math.max(1, Math.round(((E.regen * hp) / E.hp) * 0.7)) : 0,
+    };
+  }
+  // bosses and tutorial foes have no trait
+  function foeTrait(ch, key, maxHp) {
+    return FOES[key].boss || ch.tut ? null : traitOf(key, { L: ch.level || 0, maxHp, atkMul: ch.atkMul || 1 });
+  }
+  // opts: { stage, rank, curse, cursed }
+  function newFoe(ch, key, opts) {
+    const E = FOES[key];
+    let hp = foeHp(ch, opts.stage, key, opts.rank, opts.curse);
+    if (opts.cursed) hp = Math.round(hp * ECON.cursedFoeHp);
+    const hs = hp / E.hp,
+      atk = curseMod(opts.curse || 0).atk,
+      bn = bossNums(ch, E, hp);
+    return {
+      ...E,
+      key,
+      hp,
+      maxHp: hp,
+      hs,
+      atkCurse: atk,
+      intents: E.intents.map(it => it.map(p => scaleFoePart(p, ch, atk, hs))),
+      block: 0,
+      poison: 0,
+      weak: 0,
+      str: 0,
+      ii: 0,
+      t: 0,
+      phased: false,
+      trait: foeTrait(ch, key, hp),
+      feast: bn.feast,
+      regen: bn.regen,
+      chs: { atkMul: ch.atkMul, atkAdd: ch.atkAdd, hpMul: ch.hpMul }, // what phase 2 needs to scale its moves
+    };
+  }
+  function newBattle(e, run) {
+    return {
+      e,
+      rolls: [],
+      rerolls: ECON.rerolls,
+      bonusRR: run.extraReroll || 0,
+      pBlock: 0,
+      bleed: 0,
+      freezeNext: 0,
+      dazeNext: 0,
+      turn: 0,
+    };
+  }
+  const curIntent = b => b.e.intents[b.e.ii % b.e.intents.length];
+  const enraged = b => !!(b.e.trait && b.e.trait.key === 'enrage' && b.e.hp < b.e.maxHp / 2);
+  // what one enemy attack part really hits for right now
+  function atkValue(b, run, v) {
+    const e = b.e;
+    let x = v + e.str + (e.feast && run.hp < run.maxHp / 2 ? e.feast : 0);
+    if (enraged(b)) x = Math.floor(x * 1.5);
+    if (e.weak > 0) x = Math.floor(x * 0.7);
+    return x;
+  }
+  const salted = run => hasRelic(run.relics, 'salt');
+
+  /* ---------- dice ---------- */
+  function upFace(f, id, run) {
+    const lv = (run.ups && run.ups[id]) || 0;
+    return lv && f.t !== 'none' && f.t !== 'mad' ? { ...f, v: f.v + lv } : f;
+  }
+  // roll one die in place; low sanity can double a face or turn it into madness
+  function rollDie(r, run) {
+    const sk = SKILLS[r.id] || {};
+    let f = { ...DICE[r.id].faces[R(6)] };
+    r.dist = null;
+    if (run.san <= ECON.madAt && !sk.noDistort && Math.random() < ECON.distort) {
+      if (f.t !== 'none' && f.t !== 'mad' && Math.random() < 0.5) {
+        f.v *= 2;
+        r.dist = 'pow';
+      } else {
+        f = F('mad', 1);
+        r.dist = 'mad';
+      }
+    } else f = upFace(f, r.id, run);
+    r.face = f;
+  }
+  // re-roll one die (the caller decides which); Yith keeps the better face
+  function rerollDie(r, run) {
+    const old = { face: r.face, dist: r.dist };
+    rollDie(r, run);
+    r.fresh = false;
+    r.chaos = false;
+    if ((SKILLS[r.id] || {}).keepBetter && faceScore(old.face) > faceScore(r.face)) {
+      r.face = old.face;
+      r.dist = old.dist;
+      r.kept = true;
+    } else r.kept = false;
+  }
+  const canReroll = r => !r.held && !r.frozen && !r.banished;
+
+  /* ---------- turn start ---------- */
+  // returns { ev, out } where out is 'body' if bleeding killed you
+  function startTurn(b, run) {
+    const e = b.e,
+      ev = [];
+    b.turn++;
+    if (b.bleed > 0) {
+      run.hp = Math.max(0, run.hp - b.bleed);
+      ev.push({ k: 'bleed', v: b.bleed });
+      b.bleed--;
+      if (run.hp <= 0) return { ev, out: 'body' };
+    }
+    b.pBlock = 0;
+    b.rerolls =
+      Math.min(e.maxReroll != null ? e.maxReroll : ECON.rerolls, Math.max(0, 2 - b.dazeNext)) + (b.bonusRR || 0);
+    const rel = run.relics || [];
+    rel.forEach(r => (r.off = false));
+    if (e.relicOff && rel.length) {
+      const idx = shuffled(run.relics.map((_, i) => i)).slice(0, e.relicOff);
+      idx.forEach(i => (run.relics[i].off = true));
+      ev.push({ k: 'relicOff', idx });
+    }
+    b.rolls = run.dice.map(id => ({ id, held: false, frozen: false, fresh: true }));
+    b.rolls.forEach(r => rollDie(r, run));
+    const fz = shuffled([...b.rolls.keys()].filter(i => !(SKILLS[b.rolls[i].id] || {}).noFreeze)).slice(
+      0,
+      b.freezeNext
+    );
+    fz.forEach(i => (b.rolls[i].frozen = true));
+    if (b.freezeNext) ev.push({ k: 'frozen', n: fz.length });
+    if (b.dazeNext) ev.push({ k: 'dazed', rerolls: b.rerolls });
+    b.freezeNext = 0;
+    b.dazeNext = 0;
+    const free = () => [...b.rolls.keys()].filter(i => !b.rolls[i].frozen);
+    if (e.chaos) {
+      const all = Object.keys(DICE);
+      shuffled(free())
+        .slice(0, e.chaos)
+        .forEach(i => {
+          const r = b.rolls[i];
+          r.face = { ...DICE[all[R(all.length)]].faces[R(6)] };
+          r.chaos = true;
+          r.dist = null;
+        });
+    }
+    if (e.banish) {
+      const gone = shuffled(free()).slice(0, e.banish);
+      gone.forEach(i => (b.rolls[i].banished = true));
+      if (gone.length) ev.push({ k: 'banish', n: gone.length });
+    }
+    return { ev, out: null };
+  }
+
+  /* ---------- your dice resolve ---------- */
+  // totals after monster skills, combos and relics; T.steps lists each relic that fired
+  function tally(b, run) {
+    const e = b.e;
+    const T = computeTally(b.rolls, {
+      eHp: e.hp / e.maxHp,
+      ePoison: e.poison,
+      eWeak: e.weak,
+      san: run.san,
+      maxSan: run.maxSan,
+      armor: e.armor || (e.trait && e.trait.key === 'hide' ? e.trait.v : 0),
+      lull: !!e.lull,
+      comboMin: e.comboMin,
+    });
+    T.base = T.s.atk;
+    T.steps = applyRelics(run.relics || [], {
+      noHeal: e.noHeal,
+      noSan: e.noSan,
+      halfSan: e.halfSan,
+      noMul: e.noMulAsleep && !e.phased,
+      shuffle: e.shuffleRelics,
+      s: T.s,
+      rolls: b.rolls,
+      cnt: T.cnt,
+      combos: T.combos,
+      lv: T.lv,
+      san: run.san,
+      maxSan: run.maxSan,
+      hp: run.hp,
+      maxHp: run.maxHp,
+      eHp: e.hp / e.maxHp,
+      ePoison: e.poison,
+      rerollsLeft: b.rerolls,
+      turn: b.turn || 1,
+    });
+    return T;
+  }
+  // apply your totals. out: 'win' | 'body' | 'mind' | null
+  function playerResolve(b, run, T) {
+    const { s, combos, lv } = T,
+      e = b.e,
+      ev = [];
+    if (combos.length) {
+      (run.relics || []).forEach(r => {
+        if (RELICS[r.id].grow === 'combo') r.n = (r.n || 0) + 1;
+      });
+      if (hasRelic(run.relics, 'golddie')) {
+        run.coins += 2;
+        ev.push({ k: 'golddie', v: 2 });
+      }
+      ev.push({ k: 'combo', combos, lv, top: Math.max(...combos.map(k => lv[k])) });
+    }
+    if (s.atk) {
+      const absorbed = Math.min(e.block, s.atk),
+        dealt = s.atk - absorbed;
+      e.block -= absorbed;
+      e.hp -= dealt;
+      ev.push({ k: 'atk', v: s.atk, dealt, absorbed, crit: dealt >= 20 || (lv.atk || 0) >= 2 });
+      if (dealt > 0 && e.trait && e.trait.key === 'thorns' && !salted(run)) {
+        run.hp = Math.max(0, run.hp - e.trait.v);
+        ev.push({ k: 'thorns', v: e.trait.v });
+      }
+    }
+    if (!s.atk && e.trait && e.trait.key === 'vengeful' && e.hp > 0) {
+      e.str += e.trait.v;
+      ev.push({ k: 'vengeful', v: e.trait.v });
+    }
+    if (s.blk) {
+      b.pBlock += s.blk;
+      ev.push({ k: 'blk', v: s.blk });
+    }
+    if (s.poison) {
+      e.poison += s.poison;
+      ev.push({ k: 'poison', v: s.poison });
+    }
+    if (s.weak) {
+      e.weak += s.weak;
+      ev.push({ k: 'weak', v: s.weak });
+    }
+    if (s.heal) {
+      run.hp = Math.min(run.maxHp, run.hp + s.heal);
+      ev.push({ k: 'heal', v: s.heal });
+    }
+    if (s.san) {
+      run.san = Math.min(run.maxSan, run.san + s.san);
+      ev.push({ k: 'san', v: s.san });
+    }
+    if (s.mad) {
+      run.san = Math.max(0, run.san - s.mad);
+      ev.push({ k: 'mad', v: s.mad });
+    }
+    const out = e.hp <= 0 ? 'win' : run.hp <= 0 ? 'body' : run.san <= 0 ? 'mind' : null;
+    if (!out && checkPhase(b)) ev.push({ k: 'phase' });
+    return { ev, out };
+  }
+  // bosses with a second form switch when their hp drops low enough
+  function checkPhase(b) {
+    const e = b.e;
+    if (!(e.phase2 && !e.phased && e.hp > 0 && e.hp <= e.maxHp * e.phase2.at)) return false;
+    e.phased = true;
+    e.ii = 0;
+    e.intents = e.phase2.intents.map(it => it.map(p => scaleFoePart(p, e.chs, e.atkCurse, e.hs)));
+    e.name = e.phase2.name;
+    return true;
+  }
+
+  /* ---------- enemy turn ---------- */
+  // out: 'win' (poison killed it) | 'body' | 'mind' | null
+  function enemyTurn(b, run) {
+    const e = b.e,
+      tr = e.trait,
+      ev = [];
+    e.block = 0;
+    if (e.poison > 0) {
+      e.hp -= e.poison;
+      ev.push({ k: 'poisoned', v: e.poison });
+      if (!bagHas(run.dice, 'poisonStay')) e.poison--;
+      if (e.hp <= 0) return { ev, out: 'win' };
+      if (checkPhase(b)) ev.push({ k: 'phase' });
+    }
+    if (e.regen && e.hp < e.maxHp) {
+      const h = Math.min(e.regen, e.maxHp - e.hp);
+      e.hp += h;
+      ev.push({ k: 'regen', v: h });
+    }
+    const intent = curIntent(b);
+    if (intent.some(p => p.t === 'atk' || p.t === 'drain')) ev.push({ k: 'lunge' });
+    for (const p of intent) {
+      if (p.t === 'atk' || p.t === 'drain') {
+        const dmg = atkValue(b, run, p.v),
+          absorbed = Math.min(b.pBlock, dmg),
+          taken = dmg - absorbed;
+        b.pBlock -= absorbed;
+        run.hp = Math.max(0, run.hp - taken);
+        if (p.t === 'drain') e.hp = Math.min(e.maxHp, e.hp + taken);
+        ev.push({ k: p.t === 'drain' ? 'drain' : 'hit', dmg, absorbed, taken });
+        if (taken > 0 && tr && tr.key === 'thief' && run.coins > 0 && !salted(run)) {
+          const st = Math.min(run.coins, tr.v);
+          run.coins -= st;
+          ev.push({ k: 'steal', v: st });
+        }
+        if (taken > 0 && tr && tr.key === 'bleed' && !salted(run)) {
+          b.bleed += tr.v;
+          ev.push({ k: 'bleeding', v: tr.v });
+        }
+      } else if (p.t === 'blk') {
+        e.block += p.v;
+        ev.push({ k: 'eblk', v: p.v });
+      } else if (p.t === 'mad') {
+        run.san = Math.max(0, run.san - p.v);
+        ev.push({ k: 'emad', v: p.v });
+      } else if (p.t === 'str') {
+        e.str += p.v;
+        ev.push({ k: 'str', v: p.v });
+      } else if (p.t === 'freeze') {
+        b.freezeNext = Math.min(run.dice.length, p.v);
+        ev.push({ k: 'freeze', v: p.v });
+      } else if (p.t === 'daze') {
+        b.dazeNext = p.v;
+        ev.push({ k: 'daze', v: p.v });
+      }
+    }
+    e.t++;
+    if (tr && tr.key === 'harden') {
+      e.block += tr.v;
+      ev.push({ k: 'harden', v: tr.v });
+    }
+    if (tr && tr.key === 'grow') {
+      e.str += tr.v;
+      ev.push({ k: 'grow', v: tr.v });
+    }
+    if (tr && tr.key === 'dread') {
+      run.san = Math.max(0, run.san - tr.v);
+      ev.push({ k: 'dread', v: tr.v });
+    }
+    if (e.aura) {
+      run.san = Math.max(0, run.san - e.aura);
+      ev.push({ k: 'aura', v: e.aura });
+    }
+    if (e.wave && e.t % e.wave === 0) {
+      b.freezeNext = run.dice.length;
+      ev.push({ k: 'wave' });
+    }
+    if (e.weak > 0) e.weak--;
+    e.ii = e.randomIntent ? R(e.intents.length) : e.ii + 1;
+    return { ev, out: run.hp <= 0 ? 'body' : run.san <= 0 ? 'mind' : null };
+  }
+
+  /* ---------- after a win ---------- */
+  // coins, boss max hp and kill counters (run mode only), then the small heal every win gives
+  function winSpoils(run, { boss, rank, inRun }) {
+    let gain = null;
+    (run.relics || []).forEach(r => (r.off = false));
+    if (inRun) {
+      const it = interest(run.coins, run.relics);
+      const g =
+        (boss ? ECON.bossCoin : ECON.rank[rank || 2].coin) +
+        (hasRelic(run.relics, 'coin') ? 1 : 0) +
+        (hasRelic(run.relics, 'bounty') && (boss || rank === 3) ? 3 : 0);
+      if (boss) {
+        run.maxHp += ECON.bossMaxHp;
+        run.hp += ECON.bossMaxHp;
+      }
+      run.coins += g + it;
+      gain = { g, it };
+      run.relics.forEach(r => {
+        if (RELICS[r.id].grow === 'kill') r.n = (r.n || 0) + 1;
+      });
+    }
+    run.san = Math.min(run.maxSan, run.san + ECON.winSan);
+    run.hp = Math.min(run.maxHp, run.hp + ECON.winHeal);
+    return gain;
+  }
+  // which dice you may summon after a normal-stage win, plus the extra heal for the rank
+  function stageReward(run, ch, stage, rank) {
+    const base = ch.tiers[stage] || [1];
+    let rw;
+    if (ch.pool && rank === 1) rw = { tiers: [Math.max(1, Math.min(...base) - 1)], n: 2, picks: 1, heal: 3, san: 0 };
+    else if (ch.pool && rank === 3)
+      rw = { tiers: [...new Set(base.map(t => Math.min(3, t + 1)))], n: 3, picks: 2, heal: 5, san: 2 };
+    else rw = { tiers: base, n: 3, picks: 1, heal: 0, san: 0 };
+    run.hp = Math.min(run.maxHp, run.hp + rw.heal);
+    run.san = Math.min(run.maxSan, run.san + rw.san);
+    return rw;
+  }
+  // "rest by the fire" instead of summoning
+  function restPick(run) {
+    run.hp = Math.min(run.maxHp, run.hp + restPickHp(run.curse));
+    run.san = Math.min(run.maxSan, run.san + ECON.restPickSan);
+  }
+  // between chapters
+  function restBetween(run) {
+    run.hp = Math.min(run.maxHp, run.hp + ECON.rest.hp);
+    run.san = Math.min(run.maxSan, run.san + ECON.rest.san);
+  }
+  // n = how many already bought this visit
+  function drinkPotion(run, n) {
+    run.coins -= potionCost(n, run.relics);
+    run.hp = Math.min(run.maxHp, run.hp + ECON.potion.heal);
+  }
+  function burnIncense(run, n) {
+    run.coins -= incenseCost(n, run.relics);
+    run.san = Math.min(run.maxSan, run.san + ECON.incense.san);
+  }
+
+  /* ---------- event effects ---------- */
+  // the state changes behind event choices (EVENTS in relics.js call these through the game's wrapper)
+  // locked = dice not unlocked yet, never handed out
+  function eventApi(run, locked) {
+    locked = locked || [];
+    const sc = id => DICE[id].faces.reduce((a, f) => a + faceScore(f), 0) + (SKILLS[id] ? 3 : 0);
+    const weakest = () => {
+      let wi = 0;
+      run.dice.forEach((d, i) => {
+        if (sc(d) < sc(run.dice[wi])) wi = i;
+      });
+      return wi;
+    };
+    const upLv = id => (run.ups && run.ups[id]) || 0;
+    return {
+      giveRelic(rar) {
+        if (run.relics.length >= relicMax(run)) {
+          run.coins += 4;
+          return { full: true };
+        }
+        let pool = RELIC_KEYS.filter(k => !hasRelic(run.relics, k) && (!rar || RELICS[k].rar === rar));
+        if (!pool.length) pool = RELIC_KEYS.filter(k => !hasRelic(run.relics, k));
+        const id = pool[R(pool.length)];
+        run.relics.push({ id, n: 0 });
+        return { id };
+      },
+      sellWeakest(v) {
+        const [gone] = run.dice.splice(weakest(), 1);
+        run.coins += v;
+        return { gone, v };
+      },
+      upgradeRandom(n, steps) {
+        steps = steps || 1;
+        run.ups = run.ups || {};
+        const kinds = shuffled([...new Set(run.dice)].filter(id => upLv(id) < UP_MAX)).slice(0, n);
+        if (!kinds.length) {
+          run.coins += 4;
+          return { none: true };
+        }
+        kinds.forEach(id => (run.ups[id] = Math.min(UP_MAX, upLv(id) + steps)));
+        return { kinds, steps };
+      },
+      upgradeAll() {
+        run.ups = run.ups || {};
+        [...new Set(run.dice)].forEach(id => (run.ups[id] = Math.min(UP_MAX, upLv(id) + 1)));
+        return {};
+      },
+      tradeUp() {
+        const wi = weakest(),
+          gone = run.dice[wi],
+          t = Math.min(3, DICE[gone].tier + 1);
+        const pool = Object.keys(DICE).filter(k => DICE[k].tier === t && !locked.includes(k) && k !== gone);
+        if (!pool.length) {
+          run.coins += 6;
+          return { none: true };
+        }
+        const nw = pool[R(pool.length)];
+        run.dice[wi] = nw;
+        return { gone, nw };
+      },
+      giveDie(id) {
+        if (run.dice.length >= 6) {
+          run.coins += 4;
+          return { full: true };
+        }
+        run.dice.push(id);
+        return { id };
+      },
+    };
+  }
+
+  return {
+    ECON,
+    shopPrice,
+    potionCost,
+    incenseCost,
+    restPickHp,
+    foeHp,
+    bossNums,
+    foeTrait,
+    newFoe,
+    newBattle,
+    curIntent,
+    enraged,
+    atkValue,
+    upFace,
+    rollDie,
+    rerollDie,
+    canReroll,
+    startTurn,
+    tally,
+    playerResolve,
+    checkPhase,
+    enemyTurn,
+    winSpoils,
+    stageReward,
+    restPick,
+    restBetween,
+    drinkPotion,
+    burnIncense,
+    eventApi,
+  };
+})();
 var SPRITES = window.SPRITES || {"cthulhu": "data:image/webp;base64,UklGRsw1AABXRUJQVlA4WAoAAAAQAAAAnwAAnwAAQUxQSNsUAAABBh/4///p///fxYbDMAyHw2E4DMNhOAzDMAzDMAzDMAyHw/ACt9vW/f54fY776/P3+z1fI2IC+P90aDhskAFtDZy+uqmO1tkR/+oXnnkE+M+53AwycD3jfaLvnf1EJfi5PdDPg6SKYw1oWMd/yNZp5ub855tj0N9xqspf32a8gdcXLjAwOD2bz38nd483ko0FJPqyvyBKMuibLhhvGBlog82BWR34Ac+xdPZ5/4/YGZCFhZHFV2MXoo5LhpJnM2PRYMSm9OTSzKrAN3P4WPgNfP4j1kYYuKkwDwre3+z7wPuIHKAZeoeJEFPra7RzAG9M/doJp5f/PjbHGGVA5qrOXDnF4Zv2HXiFpobdjGwVcnbE+gSzCywzimO8zkbe/nMG5CcaRq7d0tnVN2H2CC6ZKm6efxZMABqZd8DASQz4esC6/2ubBBp8ujCW51zxze4dSg6RFLRfsJv1XF+YtXL2qdbo5fx/F+8Aox3qRoTz+jYGkvqlCAP6ppm4ApfDhllt7i5OwfoUhfnE45/yh7QNnRdRZl4/cDRJdmtAXyg1PIDNdcec1Tt32gsOjeicnv6dBiPMRVDv46CLs98sT7nVPgSGdcwoDQg6v+PgC3p2MePcG5BpTkR0rVgU6mPrf2ZlWB+Diwq2Mg+99pE0uWNckuv2htiwezoVUE31MLigNoK+oRxnbbtB+NiHPhgNSg37O/8lnD5hoBNL7hqodSsxO/qcgY/wuYuy+cTJkxsxNXPYsRScOUZuI+gwsuCxEhymgH+jtTDK37RC0IURl8z1ho7On7olric4FT/QQrNYMp7B6UMweGNWSXXsYtAxSK1/Ze9PUJ4iM7lCjw39KrGwzqLFcF/x9n3iZ3fU3geAPJjxUfBxDTrvQ/XQhnvIUAq//hu4GKiV9tG4i6UAV6BTOeX0Gowly50v/NjS4mDg4mlxHpsbPkCrgzDQJGFg/BeaS4SV3WCgUCGuhsNrXYXqR0zAWhHg2ff9O+boXrA2vDljlgaBF8CnFFCewoXZJH3Ckl9qjFxFkVkK9yAe0BhQGbHRgQkBK9bmhikZk4vAsA8OhnIQeFL+hAylGdgo+4h9vY9jIagw2ptfOpoTYpsphGVUtKKjwexMX50CZNAFpeaCAWFQZjHg9PoR3SsixzFoS4x2KL+Nu6G8CDi8w/z5zmbndWja2qGloBQYxMNdZKq96NmHoSFhZ8FGvHdyvjmYblfFxJNma9CVfKmSl0EZwDLF7+zXsWDWTtkqyMGHR2TWIfBkzwY/hh3ihch84qbrDe/JykTobXQiXSEoOKphk2uoj9f4/MpKBjS9ZLXJTJoBHQf8eYktaYFRxPB6h9rqhbOZR4AMR5CFQZiSVkCpEtW0wcM02yJ5URr407kxXCfWpYFZPV2DEc6qj9LHkIHPSty986TMxUsyhadlYImWggroT6yDg0GfxCyT9scuDL4Cy4l7/RVXwPO1K7EMY9XHeunp25JmEJbTgRmHpaAFAvBOcHgYepIDsvDn9FMGXWGjyQ5TTH0uoh1271AFEzfKmzBrAWYBBabBIOCGXoZh/ERuLfAxBNuok1Kw9DZYZtI2HqN/AcSQtAVKnwtBITDCl9bZj46nKAWl6yiqq3ApBrPErPgke4Ou5TGuh0fksjsEVdCvsBbA5c7WWgctYEB/tj4+5s426ZdkzgK6ahEc4TOezKYSWHB9diFg3bEPy4BKjKhNFdcE1tFt1iGe+Jo50Auo3AYHrVBn3jRGmwLdDIsfOyCjfJ30sACKc2sQ7M0pALpWcNkLDga6CNpkFAnmGlugUhpw9DoWdMCnj0ty8IgfSp+UPhtt6+DldMlP9IYH6iPTwmC6qAXLbbWOo6A2IjkvG7O6CAwbGVQkJCUyIMNGmOoqds6OmIGLNsqaYomoY2EZ1Uu028bxcjaHP5iz6mKRHIRBbASxqZU9e+W552tulcEg549JB7CXQVB9Rjz91ALGlYHbOpQWjwtiEaU+8Xb6A2Nuh9KdsKx8tTqQWJ65j62gNxR+CkpDk2xJF0H2scMsQhdxGRIZNm0VeiUo/9QntlRRakA/9c4VJIsedh4mFuUZ8eTtucdQb2BDZxpk4CWDDDIoowMG1FeBs+u4nu/vcDpaFKsCGThoEV355MeuHjDKrxrB6T4BBfKXWgdOjwE6kyG5GIYJeU/2LmhzgEYDp4CHKHaiMX08tYjjqo8/2/Jtqkc3wZlCFORWBXqMzLhbDZ6pRSRyGuQFGPWxNgjDohc5C9PFh5MoF4KjxZoudojTT90WpkP5wMgH5be+cdoYqEQi2EfSJrtSGLhndiJXJ+t9aGloYdcUokgOhhPA+yFgg0qlfbSD8E+9rwa0JHGGZMlDAR+AlneQWYMRnUHg+RMsTgGqI0oDDcIC9wH7J1vDeNomVUCf3NiOfzZPClgWzNkJX+4GOT3gdYFwKgYL6z7rMeN1Cpk+qBKxWJ0arq93jDKMBp7lNpR/0spcrlPxRTNxEiypY04Hp49BzhYc3UYvklTg46yLt/F5JYUoPPssTP8WJ6/Fm5Lr6arpF73M4SH2pg75i8g1W0G93KCd2UKB9otwCDy9eQv3zCnNjRl5GTaeHKqQ4bkozK50fult7DzOgEbmiMAB8OJPtUkegZJNH6Nhr8eFfnMNzzx8zmgNOHtBjcBElDLXKb0WzvYyFIKE1X4dWk08j6a+7w/MeGCCBvFOImZVSR2nZNkdwwHsn118Rs99rF9iWz/CWS1RB4Z3qDhFZeVAhi08rwYdgdqwfSubSV9+vsj1JZbZ94vQ6ZZ8Yha5JrMu+Qi8UhWd36FmlzvpAcfDOjIvTRoQp9jiyWNyglWZlAIMx0tuMSUDuWIkUfdC5T0Z+W4bx6SshJ/Cz1cbO1cBSq6BqOJpkVEPbG8YjvGuH/Gasa2B7Tu2nQybbYgVhgO7pbgdJ2gMdXKkxILl3qh1/u8ldgmLBiPMW4CBIhnZaGe2nykKSjnd0cYpDjO0BQO9EgQUGJlOsKinoGGfXGmDpbgbNvqFc4YzficMXA2DTgNLD1Qfz6ziyg3nF1HsTDvnnGNXJwUbQWawuHohyMFVBYMwCJz+xjpTbLA2mAfcPCkf425GcoPwYNqMYLEyS88gp4pEQIOc3cYJpl4F9+JAiCrav1zzyjWZ1R3L3D0aGYRf3LUIz5VJZNBKVfA0He+J6jpxeCWn0HqHZz4QNxmWBrVwXQDL2xdPZqzcigRKQdThpbAMW9LzMfYPzy58x0CZ7PSJynDw9Hh2dlfsBBi2bczodRN1BVzrdUBBuxVwmDoYDqKaKr2AdpNUK1Svw2nNC2VWpvGXH2aqlDn4y1uOt47xLJ0tpkIG9gcMG1yK3Tl5zuhDBs4TOFvHSitgX2KugXzA2SbiMQq3M2aLzozf7MUdg9odl5NhuOBv5fTFw4Cyzr52Z+evf6ulRb0oRO8IniWyPClzqF5YGZHbTV38/f4YNIZy3Ebr6U3yjnkgw6BiahvNrZ54zJPFeiXA2+BQh0fPeCGLysAj0wL7XK/rTyw5Xw2Pfsn2ZBgSzdJmHxn4xEYUiAEj9tYnMud5pUW9bEXwxAfhmVqbxOmJ9OzsynDQ26Avuh0fp6sq3p6OEn2cF54cDUotkkPI+cffqkKsl524F3dc9fF8zxhM7JNC9CSTMuxl4C1mNV04qwunLhHOasnz7hc3mX2GEasQ/cRgPcnc560s2sVSvNZn/DlGxc6wNGwB+oxBK+RlLl22awNiKMap247cyiDDqwrTAZtryIjG2QYTgVjEZ+I4NHcyr+/Wy1LsdMe8Q1YbXhmUIEo5PcXTPynu1lR3ikNGzra6YFaGNyzWiHeuDnHHAvrTO0yBqa+Rec54w9Jis1yJHgN1tNQFnXdMLGJl9gGw8yUiue7FxAofPL2Fek4XZGV4mrfcUOSWWOBRi+jcB4iHq0dkbn+olykt2kUhSAaxk9Nr0AHv2MaHtBbrUpAc3KAcoMwNU0E/Q85vEuCpZ8F6mYEPZ4yWiBfObiYuMz5QWKzLxcRd7JwVZjTn6w1nBQ9Yktx1ZuIULDN9PLgNeAawSsp17qTPBsUEzwSBgZvhuL6ROc8YjSyaRSve90e4LVhnWuH3ekct55V1vtcjnL8G68zAw9cbM3QTBh6lXyQgwNNH4bPFM1kAlKfIxB8qcmtaMBuGk1i/EwRYuMksKdYT549hsQ1gHyCcf8copyKzcyKK3g25zSnuM4D6xIARPiddH18dobA46JZUseoEZWW4CE4W2zG5KPv+eINeZhC8zZNZTzwHUWW2sTu7itx7gx9To9HKLxKcqiRzmHE2F7fRaQ9+iPoNYEAXTs07olWitAqDwHAWYKDb9gGfZB3s51xwNmIjIg6ZRnjmsGLL1chVrHIRmeOMgNICRmFVwZDEPqw7g3mE2hvuBHsMvATPkU7OCwNKdsjALpcXZivglbwfoNFE8ioFdDva5sY7B5+k+0O1ZIWTRVTvhC4sp4ITbBf9InBWsDcXT1bMFJFAHxN1AHyugpuhlWFz68KEJg+nsMxyil0bLqcG51c5OEamZHsUb1NgqojGwrwwN0F/RpljieeucGRE7mX4wPtZCx8Ei6R3eibHMW5LE4lOL66PU2jmK1OiKV8ysDGIo6ESK9SGGTFPwW3E6UUzhBHO38nxwtl3ye1+DK8Mn802XHzamBh4G5QMFubFX2r7xUK8zxMLw1oGBtHsZXaXRchXweUYuZ0RmUVAw2X0E1/Jj+0+Mq/DiFJnBZfQ9Dpu7iMD19DnGnPINOTei7gPE1DgLlFJpRvIAj8Eb0gGvXbsmyd3KzV6uAsGowQ5f9sbzp5uuG1VMFHig8lsPCLDdyJ33jE+M1VQ7CNOhrZ5xGv1FLgOeSXAeXnyBNwu13hevMKPa6BkJzJdCyD2Ywa2mm8mCgv/tV7zbiM+T6x750st0fOQCLyb86imZOADSwPbjfM7w5BUL3PzHbPLver1jFMkaf30i6/aeTxxI2gEh/cECE6loIfFuRLHIREwlb9RJGIbl8KnaAwydLqZqu9idDai2jczIvxaR6KtgdcXGC02qPMGU0W7F8tSZ1rPLDmttUFAtVRqKIw4z3pTh8w1TnexMxc8Ucuw1DWCDKBxRWbBCiPMiMqEb164Aj0Gc3sL/AlBF9uc8LWPrtA1oA5gGwaGO4gqt0q6o8CIawcfT94MSk7rDa/bDNeROQI50OJPdg3fjFzfeb/E2vsQLML5Nm7FDm0ZUTEiDp5s465lTsmHzDaOgr05k6wMRfJci60140ZiVOLXOiyj1+MnNliJNtwtdhelG+KWAe0E5yZCPBHFyDuJFa5leEwwZLpoK4EBOa+kF/CecwoR4Y8WYWBMHgA+MK+OJBC8HLFSuviEp7UHOBvljRJOMZ5rwzDR7Fd8DKirIzMt3uaULOsZsNobrmrwWVjmiG5Y3/59wDWA1hGuQ3nPVb6NiWsUmX1czlvDOFGqCsOd1bGLOZvk/qRPiDreCTLtrY+jgFdvEn328CNZddF4wzdni3Vu5jHOmZF39IbnRH0UBnE9rZij5PxC2d0xlAGejfLt9R11Yv3CW6b0Nr5pLPZfnRmSz4XBb+A20XQZ4NVH9c3xTm4wZ0OXHDVd7kOnT9CWPwM7LIwcMUOGh9hRfLM443Qw26VnDCwe68jxiHJreCS7ZLoyyFAmhxnrC/0gyqv/aAZZ0M0rDNx0Db5dVpGR8+M5A9w8veFsQAn7mFGt61xhRrYzNhf6j3j6F+C4joP3kWuMEvQJWEc35/DEa6D5hKnhdZpqkyERTjcG+RozOugDNzh5zGjvNF4EcIqfazasfCCz3ju7sY4BhsuMMDBSl8LpfWvWGZkPz1npYbOIiYKdACOcnVG/WFgcO4z+YmOiR+x8JuM2J6gC7rxdTlkYENvInOs7e/dADaPHpMFQkrSjpus4fnOYqsxyvw6ZH6qSRRXPGf1Eo0l3KxRQXGRAVDSUyVores88G3YDHpyvnzO6iKQcnIrCU6Upe4HRDxt9LMyO3DtXbQULIG56xNnAmJxHtFihZCNo56SFOd8tjPDzzsSNXYIfQX5qabRdh/VjB7zMROSm78pvTjoG1NH6daY6bkP9mUwpICeqDKDFaAoLMPvck1Xm8Y6vCiOc/tVWOH264ZtLm1sYsXV6BNQGqzsZzckKvI+jeMdFL4wwmRFlD4bXF5iPwPoxMM8q5EXMEpuVJn02pZIh2UfLjlmaePkaLEtOApZv8TFUjOtQeUNFki4zBTPOBobVzw2b0kDDLNhr0mnhmcfQ84V5TU3eDbxV0FQq0GCQAZnu9mShbIGrTBu50shw1i/+fdhnupg10Io6YMBXxOVhWD+EqUL+BOhM5jCK3jD6/UTp6Bd+OisjTB3yOlky9pkNOXLXXwnMyweq5J2Bsu0T549vTT6MRrPSqMnR1GQPZJwd2R8NrzB67kPeJYvwNrNjxnEQ/pV0c7vQJKeJaofg2oZh4PqcKo1wOnUyym0j8zCMFrAIMwhuorHSJW4yfeQGI8z6VwoZYdqkmzipbgOOgQXWTLN6CfeaOeNMZjR8XoKl6M2do4FLpgrX83b+BDL604GzVbK+5/aqV4hP+HGdNegJgo1+5EnmshE173h+BEZcMShbh5eZDZmnxUa//45kn7QZ8ViQ1lFxZe5NcLK+nAFFQue8Uguz4ZlbhFeZJRlf4Tj+XhtLv9gsBKtzAmwz31vgH3okXYY6lprihjDKF7j5Qkb++4EBbUn3kbwoJ4rRzPkAxc9seZohB29Dmetj8IU5VdIpnxz+jS1wzpi7QV5N4GvMWLMPvjYLsutgCp/RDxsEx0wXdwP9v7Aw0IDgFAZKx9Tvmz73jjk/vsNZZW9sDgb9N8DdICO4czK0Z/9Lrxz8A+8wiEPOQET1bywP+J3ZUBvEP5WvxPB7poYqVlOdjP7RRwxW/mRYHHnx72zcB6l+e2OQAWUfBvr4V1b4OsGwDqsw/w4IPz/67WM8vcG6XGPGttM/+/cBVqfI7erw+gPvf2iHb/rt0bAH6l6TO4P+6epJjmtg4PBc8m/IMKx/q3IfehhZMzfoP9fXwkAX/wJY5qDfDgMylHP+o/8+DBb8M6fLhuHXGl9DtxH9D7PbGmj4NzDo10undfyP439zBQBWUDggyiAAALBmAJ0BKqAAoAA+PRaJQyIhIRerrtQgA8Sg27bEK0C8AO0AjaemmqfTeaByv3aPf9a3VXmG8+ef70bf3z1Dv7b0LPMB5p3+9/c73X/2j/V+wB/P/9b6v3/Z9l3/D/832G/289OP94vhV/vv/c9Mv1AP//sHX9a7ZP85+Rvmr+NfM/4X+5ftr/ffik+1sj/mn8H/z/8T6t/yD7x/lv75+7Hsj/wPC/4+f4PqEflX87/0O9Z7j/nPQC9v/rX/H/w/5Me3p8V/1P796p/nH9k/2PuAfyf+jf8P+8/j18af3v/uePb9a/y//X9wL+T/17/jf3z8x/pW/sf/f/rPzF9wf6J/mf/V/rvgI/nX9l/6v53d870jv2zdWOEqfTSUTvl7aYvfZnDCTZGW8FOmBKjIBwDShe6CL+Iyl4e3MJLtsNneCqfVOLTE7tOf3r1RSozoLrGnFM4DF/h6hXaL+Pom5hQmojthGg7h/ovh5r/Ec7xKL+00l9/xAmxJ8l4XMIPgwnBNUttr/sV++Di4A86FNrDJ1yMgIwSJrFStWC32zmyRdHidR1hsoxm865tZbdAHxJkwa3LOQjceBPBk51Mt36bgH2Xw58MlwTARHX3rMmZTixgNwH96HukuTiuY72m1TXq3AGTJxym0ejd53fXzRVcJhLW7JcoCnoiZIsDB7t5mkt0VMSljqANJqX1pJ3lp6/kEInPtfF99rZ/r7vnE07C0ffbRy6V0m20mBac3fzeQLLSWeA2GRbqNY2UkTqJuEv+PkAOpdjjzBJStCmKQheyQVEF1rZyfirqcfq5Pb6wb9bT5aHd61Nib+Q3rScBpyfAaYU412sIZJeWze7i8l9mEiVvGzL4uiBUCvaUtSmBuMA4wWL8Cj0qgWNQRY9r/7TTcjTX3Q7LXbN3bSdgJnNuHxI6IQkpO1DjiSw8e4w3Uai96wThaIxebf5qf1xszqXv2nPmfgnJ87N4+Ugb9EyuHEuamSqlcuSWfBg/FGEbtKcpSApR3W4js/30zQyX4UZ1aF7RO5qY7GCvT8glNZglDT+SXvxWuEF/ElVMGkLCvmZrj75F0W+CmqujuTSeOrkhe1J1F3r14hmIkwIQAAP7/YBhds+ywlIUTb4fdWSBHtPC8PO2xrOmCvE4v3W20tKT5dhkNNp5n5Yv/Y9rj3nU0xszfIGLbfYMHDScG/XC48S1sjjJQVVp00rvlkpRlSpJOsFZQVg7hpRSTSoLJ0pYpX4pv6TCfkekF8+GxRJXkiO4KoSnba3NUBT9+QN8hndocuQVfGCLVjEG4mWTiwLkzzjvdmqE9bAPsFSzZxpOyLoQOhKnOznySP6rPBVQ+2+vts7pPXUyT8kogvi6NY7KJUnqOfaJ34xwFR++/Zlm2SgcOA8CC4WVC8x6QvGb1Nxyx7I1NfAWaqP28z5yFOgtdVOsSFr6Ubfvy66ta0c7jOefcFG9dLSteyO2JLBhyraByzrpijqMdbGffTZaRw4i1zgUtk6jmeAijsX+kJ4F5X9GT8fhhRMgGQIoPy41wzZOtH4triYSuImD4vASvLgX9DhB87EOP7sSQePM86P9VqqgQ+oIdrXAh51rPj9ez3rbAh+wL3qj/xo+1uu8V3ABKUqss5N45cTzjvLTnqZe6J8F++OeD60T2pkfLWGEkmWH1Gl4SebSi0W9lsa0vqTOBwSx7zv6RVCqThok2/8k8JP91HgcP3gjNfACLeMb7/XAlgx9/bmWeO2WZCMUMULGDujd2fojn/GaLiVJ60cP9y6pT/m8oB3r+OHfiatAJh90lT9dnHuq2cWt9aV6VNZlA/TLsIOAwx0pqgRqGXbQJnwYPzRvaBdod+h7kVINjEjIP229WSLBOhtekBeFD48K1iZ/vATfO2gCY/Tqm/w437mJ6PTPAoZP9Haz8E3SualEevaxb+pDvQ19Ze+QDpSlIMJbPyRpMmifNEoPrycCj6OqFSWRwg5vBEstkEDrd90nS6JXs4yPczn+zNSaBdi5+RtRIwUC8VJIV18i8HJWFRoEGyYyqGNREdL0ti1UJVjQChawMxepKulUAeyz+JJVKxnRhRGTZ2nmK1NOpj+4disM9+hEL1aj9IarmGjVpE3ezPlNmtivC1qsyN39BygJk7OX3O+mhwS9Mb+HKel7soswnidNSp9rqsUYePdWx9mOTQIB+d6IwKCoSerr6+SizHTGUrWn9l5tccS7n7eXoZYafvIZjc4UmdiZBG+e3t4+wUnjTwCfmjPOUclc//7hwq2psOgtFdp7NgF8tWK0l84etjDd2g1yaFfivfb1MRDHxuNslS5gZvJvoheCOsFAW3SCSbU66jcMBiUG1KFtw+DwtYsL6s/69sr8pn7jOu+q+vm5aEKz1JAZL2vSo1EI7A5JR6ke/YlmV5FABjpMJ3ynXO3KA8xSTMFjnPTreGw1Dqg2ifAYZ17un4rbSuRsVBArmrhlwd3zXczMvNYPSxdoaBs71LtCSYr/Qvro7Hb4b/Bmbxx5PD7xnQkHsV2Gwq+O+LcoO4634HHerPwPdSGgt1Cls4bPn+j+JHwPNZ1nk3F36i8xP/vVewt5P8LfCk1v3OhWILKu12XMWUmIE3XCKD2sQmpHc/c5tnVN+GjtdiIFAjR15bOctqe8GQszTkTm+4YDsapJUJUL/4s/SLnE//4EcZG3U5P+kflPC5zK/BkStn+QSDAtMvHi8zdkPGzdVs81OKSWeSsWjW9lPmlPxYo16juL8ZfGRDXFY+Cs7k7EYgbE6FPtt79PkoPeMtUM7hXnljs2yLZiwcKu+NCrXwDGKRdnlgurVFSPwP7hQv5UNVrb5WtWQfq/xw0N1kFAXOpX7Gcln6mtJE8VRAReFd/CVVZd+kCpoXDYbeHSWFgzw3+TN42/iL4wWnkrruZZsuf0Zz4VSNu5vR9AmlxCo4KyCeae7SwCVlYHAZv4gm9rXEYnTEbT5sB7ey8l+jgyAUiKfMq3rvLC7xh9NyJj6hbUpyDhiPZSji5IC9AxVjz4WhmAeXp9e+ohCQmI4nuH5uwl5uqE2A18/dV1MAX13wdU6N51JXyPZIDe84RJHSEzoB4+kfnbK3zf4Iqgu0dWO+cAbcHvdAVwTyXdHYdodXpOhMVl/jBsyUEG6JIXwNxmv/8yoye/9HuwgN79GgzCkCPVM7IAQnFbz/2Wb6Yw+0omwfYLlw/d/zuKVZ/UfIGAQd68sCQQSRvq0HFxfmeuGf7z8KWnw8sRJw9/hV4PzzbD2vuOydGoPz9YyZV34MhwkB4njgE8xBFfPMM+HvV1OPBfTnvWFv+TEh5jE7yKG6GqZy1Zf3znQR+EeB/pHajKaQ15cvR4m5LNBro90krqYKCu49Q3L26Eq/5LCY/onK7URzhBSL7I/G9cvKiK2a4bZ8GYjTHgsM19dymLodQPB2ClnBXSAiHOoLQqnfkN65LVuVtc11OBq1ByavavlemSU6JMzsoqND/wlqQeN6dmKShgSPhx9tcFJpcL8kAlBaLNhADa9AA5A2g7g5DvVrcMWrcii9aK/JoAxgI0JAAzdQvGvnFrE2jsRUvqMOho0kjm2BzLK1KN4L/dZUFoYoh08TeJniYOPK9de+Qs8EqtjpZONlcG1VqFqHNQbkyxEXiyYJTaUsHx1beTINavfm9qmcd546SLjYYVw6nu2e8oAXEmBbQL/Q7ywuHjskd6oTZnoPujeGRrMt5dcs7LcvDBrI5FZBAxoDe7rBabY7O/4Y9dPmT0UCCzxfz2X8eJdTwnKBjn2z379HMYc+j88+am/uS7fji5LFBic4Es53GgMjpjeVWG57b3qV861kzC9lkN7C4mpseLP5aHYUJbdECH28x51zEnOMO4fCvWBJ71iwNxaY09RXXYsG3X5LyTHz2wzZKaPH/RQ5xauVyPhZr1IZSV7S1MZat2WblF7FaTxBUnXUzxG5t00bBBYpiTdp9aJcvH71d6s0Ugu0+rBB0ujXjb+n443eV32GB6AzClr/6I0Ir+xR0LBS2nSwN8T9Ow7qrxDdq6YOjuoSYmbDFIMiZPcOP5A6QDnqfK0i9mEklEvMnD+9CbdYtutF/YKt07vSgK1qoAsmtt8GOvEyx6ZR9WEsHCbAUII86QGNishBgf+AGL9/p8w+M3gCHOY3Gslwq/1iOwjtEwMKT4pTZKaIkufNjk6BQ+X02wVkn8dAqiK8f5pc104T+t6bVm/MJzDJFC/8kuVBverW7tJYXcZz3F7jT7i+N1uw8v7710IOUDlCzZ7vkT0R2DyXwaemsoeWsRbsNy16iI7BHgzqqR9BkNVs2fVjzmSU0feyDIaZwwAH6qF2vVZEHYS3zygR0LwPTgMNSuijF+MXl/0RX47R9JXBjZIiLXXb1vQ7w54yOCs3ZnK+N1WD2jx82psTPunw3+3UADS14+Dmbfpxc898zfjbJbcvFqOhN4FruQ+loTJqWPG/sUB+YGYn4UbcT6Ph7LhU11v58zIL5FXUaZA/sO8fHw7bZB/LC5yjc+ZDQfOSsAIu/8k07jXqjJL4AvgxDe6W/bbhRVb1ORj1ybf+3Eid1Qlvfkbqo7EMQm5sy//2ClFOhNwXKPnxL03zpibkikX9KLNdNcPFJjDahRjZmwaLLOTTu1PaSC+S04pF8qR6jZIxGXomi+/wJTMuFsvCdhC68XTnsF2CjGuqPJjH79homezLLIJIXZHGfKMBMlI/xqx36kXD7+7BDQsFGaPfLpPMt7tmpFcpXYQDgCWqUpk2JBiXDGzBnkUvxK/TqCvI62dkaQbPwZjMKgBWn6Bj7k9t8JOB9kjcG6TVWKYDjlUFBHID5cbuIskcGR5pv9d5lOFDMwYsVnWc3kdxiM+fa9nd2axCcPyZ1XhgSL1Uqah2JuFZGr0GbEl1ln2eQ09qtU7jlM7iah36w/Pma8Axc0IVF/VtAoCLRs9YUXcQeRYAisYjx5k9yvPl+svZ2v+m/Lwwmyb1bAAxUjh0rVU0/dyZhnjPliTO1NIySqFJq5P7zIQp/TywZBk5xQ7w9HR74042EMBSkEhj8dNl4sIejtV8h172TqpC/+R+RZf91huh34q8S7aG890c/Q4ZdN4rEmAw+QFWa11/mY5FNEr0AOj9YUYN0KQwD9IzTsJz1rL8TGgIPl0cWFtyrUop9zegcRIcNK+umJdMvKsmBoD2utOQ34HK3lvN54JVc3dwJZKPWLDYnLc2egxD7fOreEkEp+X+MwTiCM0r1pEmPywFYeIt60Jg8Bw7xfuqUmerS3F81IFQx+lFhGNIKjBwS1QH7mwZPuV5pBAfQeKPFrcKe8mxQ2SQPIic59/maiz5nwJCuoYzgL5gTUmDbmDEkVOBbV7naHgvhocYwfZZ7Z4813KzI+5dczf5eq5y+EKtMGAexD62fYOH3wlf6L9vYUBpluJlkUf1pefWloDwKLqQMlH+QZIZTxd/HWqz5r9jqfFMCMd4yN/AF9h0MdU23ng2MPml0qQXPB2xREZXacwrVPi8ANj/Lr11fWSQnAZhHhJAYhErhkdB57ZsApiCK6dwib+cZQRl25fBHYFFfG1jBqRdIuziFQJgrqjvBd6NDmJ4z75oYj5NPz1He2WbRNINdy73A9dP9ZOqoNGTKaoGbD4DcQHwIiS3BhsL9yCrt1wjGsLxYdxLlz5R3Iy/citTXtBcpwO7cwL/heQX5o9bKCG+YSVd3nZJ6wHnyCQqdmEhW2Pds96+bsmkWxQlU9sBH55mRDsgC1DTmcIGxDvNLyx9vqwg81XUR0qja/ViALopMF2qR8jtg7DVaNZDDtxDCy73xPI1QuB1OnghW7IMzBLrkU0Rvg0fjUFahlWx059wtvKlNsf7QLO+k7Vonrwp9lfQo57QcAvvq4s0ALPssu5IxvN7QO0HuB9opXEB/jATUU0xHY8S6lPcsczYU1xnBfFl9TYwAOXoqPAEIm6zR3FlGRHwGl/B1AvHuzOB+7feDnd/kCRmPjXcZIy8tlcXe0Fz308mV1yRY8VsFxKyrTLER+n8PT8U1yS5d4Lt3yZWY3yp2sm0RXmjkQTR4p1odG3jqeN69SlZa3TTzeh8/vrbKRHKkbmGAnLCzNoRAGQcM6HPmJT1tOkYKe2OOrDNsTs8Z1GxkTGy6cqU2tlypy4/OpKFkHAkAnciEMDHJL+IztlMz2wVhbLqET0tZeeXq4ZvaE8HIA0EWubFq0vxFxGQdOo/40Qwsj0wUgo3+d34PsMJTCbmoaZ7Jhrtbt35rZgYZrQoNDUTxGzO+35hRwrMSnnSli7gDEPhHcn9fd+JUeEsEE4n0y0cQdJK0yoyLMOU6hbQSp+uZGX0x5xTw4Di/qRDg2mApP/P+FDSIG3ErY1uTKi59PYxo2Z9VzGV6h4v/n3aHLE/SKEGl3k6SiIgIBiUbPCECgcoXAgNvYPWljnqPorvagXKg0VZlCry89Rn8uLnHV6Zuy2f2OkfV34FxvhUd3aIKmr6c3LSHnEh5VX/DgcQ18TvYA2aorB2NEKORIehB1Wnyg/Amurj87n26sLxtKRlM5s6Qe2n7YQBZmouLclzmdWB6011G8tGN8BJ/Iaag1JFryeHLjkgafjhe+YtmXpsidKBrG8lqAkTOpOL2NU7fnre4jz7xGyHEXmxdMrQqC7InLAZAAeqSgQhUhj93yX75WOT8ORVkFlD4iSDiDjyXCFuhRKrsMWUOmg34ycDwEj4f9Vwp7ebU3k9bosIpy6//IgcsuS/mEfdKXTqEMY1FkTBIurZb8aPBFAAnC0isnJLbc52bnnXHa7hv/SVtUixuweGwVOd0s3iOGdtR8HzdQ0XMJfzFnmxE/7ay2FCuVMBXKmgeMNbq/CxXZwO8+Oac0oIUY5GVatlkm26jtI2pqs+WLFy0KRBOn722QCjVTek1lVy9XGPv70GuMvtRgJvJZESbWZKz7mVI7vhi3wmuUNB0OqQS2mvhFD25X4bh8dTrIUuEDJzETsWeKFjDxYUOuffBNtkrCu/IfZ15hparYc95j5FQaTKQyadKQg5tT1S2NA7KcuG9RR4wcy5wYj+Qf7FlIvVCKBxpwNsQkMILLaZLO3JS5g39mO/dcqGTVh+GwSuRmNimsjOCJNg3e2n7rBUm2h+izimBcmqO10Xzi9h1bCg1XI0KgpxtRoEl/iegWwW1tmKhJPMUVssS/coX/i8cw+6G4WgotT8gmYtLgO9s9lVEesczHZCknb15jJgEzjnHqTpsp6PrG4bI3Q+Su5DlslvTxgeA5erFjyuW/eGoBw0ANFrhPsp08qNLBoUl/A2Ak6KkI/os9X5Xw5ckyp3k5eEjgaxqBi3gTed0xgdK3piUIvXk8A09EgqUQ3w7hlMeVcXKZfIf08vjrM78GErOM9PzVxYzMGtuIVYGrZ7vzKE3D+rVbGV3fOebPHS42pFixAOeO+QI6Ojl/0cyHzZs6MvoYQc8bhCzoBDPLX1qVvuVrLH6CWFt/DPNuaEJhIdJqkdyYK29qZ0AqIi5YV3jMI58ZUeviR75LXSBKZh3dahI8do1Fdiv8qUtW93pCKmgEDJsUwzbHdpXCYBTse1T2NicguzQdOoC+c3wQ/91Jq1YWQiQisHbBANhw60PyHwa/NP/ff+h4j8g25/fsd7X2U4T39/vz9tr/67cxw13CTht70+Bmfv7N4kyBg9LBYWG4+X7jp/XAYR3/2PSuRxg+IT7VUESIzYV0YVDbThKSySHvhzJXUw9W7xm5uEYgJTfJsg64AeHpf9yx0LoaD0D+ru2AXLZZWNHHj2lX3PzoasyJVyfPQ1C1TIru1pQN2vFHRUFlbYJuMJ0/u/uOvDDWz+0sqQK/aiboZZ1Wn/JFJMHoZdbrQltwplO6p1sLne0kBeMMzxzqhaxFeJlm5CKNECKlbWiW8riMficpBGe9Pbvz1xgmMdrAgq8AZiapzjUAzny/8txlDIPN9yr9bKqzJhqsqUFPASpji7URrfFC13d8kpX6LzPTOHff62CIZcVsEEy5WM2AdToHqKbt1yScDWFVnEugeggSJa0leiN2i+TlZc5jr2vSupsHQ0+pYAsHt36ncLowtUI1Wo09tKJQVqs05ZGPjG0N2JY6159cqcxL4oWtN0ZX3ky3cDFaPuXU9nXUujDpHWBpm3zgT71ihLiMuO5Rz8B7DGHLQbfxFYjWQV1OHdViIF0JOd2O29u1GmJAuunko+PxL/UGd3V8ZYbksT0xfVeLj9ZVP6RGTejl6kZBcCIjPc8M7o2FS5TEwaupZlHXtr6G7cdCzcluka/aQ8+u5QLWR2cxVhSWsSkwLdDN4opD3o3K7Zb75p7AFMz0d/wMMzklQSZJTyQJCRaWUO+a3yAW0kLJOByu8CoB3SNjVOVkD64IW/4Ek0josLgJaX+AQGE+5ehmrXm2gOFSyzHTNjBqAjTfa1fXErS2P/cUywi6aMlQi0EB3omB7RjJtjshtrsUEWylUqm2bZ2coTy+TtstPUCa65dS11QpI8s51Z5ofLREwsZ2VNHFOQsJfTHaWUbZw08RAQgy8h9RT0yicYRtqC4BmRm2Z+u2Btnkq2NESfaQNNMajmuFo2hcMaR/xqIUU8Y9AFX7dYu2HURSkOsh/B1cDEV9c9mWxUTE0nu1pJQJ9WwPeO/WWj8oWYN0UHF6EMRHiBhXYm8KQx65mF9KEUsRyiUExIDvN1R7OpwbvIvCC3RS7XRMU2xMdcXgfM4f8d3Hdyyg+/Pq8DWWJJjThnDxp+6VO5tBlpNWKK7fmBKWxbbP8VQf1uf+XPt6WHR7+47cuXkHHIoTcbnAIWncrDmC8M8ROCuZaK0AN1HO38J0PMoLVdJFDcaZZL8ePYl4FBccgtkmNhcoLyPehaBdVMEoitA5EMt9n3x1jc69Th+R8Oh4j/VIIlG9hpp8gYPWPoBPRV6ti7MHz7nqVRBXQM9u0eXkC8+tLK6FIwjwOm5mYDGjbtWXvbzBj/szwjYz9n/Vk9661AqY6McnpETCxUf/04BkcM0Yom6lp4wL6YMtFqMHMt5OiLO+p0Fy78AB07ZD7GBw+4ArzNtpEgP7W7A1itDhPgeyvLwBTHrLircTPTbtf5mge/TmktUKlHELGihYE7/7gl8LK78sTirPzYK7fr8kjm+HlZIPF+i2R/lVpgZ8tWCYFNm7lH2/hmMKyyR6xJTHGKPZ2/s+3/y3LuesQcP6/O0YWIYB18QgGznrguzdvz4QFGPvIgLckVQZx7uDpCNi9GD6Iq5yVdqqNJyoaoMYzXS7EXMGxPoiF2ro2n+kaUVw1sKZmwjyeW0U+PZ+NpMp2FRjPeDU6TUT/bjMTzRpYqHXTJ/4MWlzBnR7jmr5AzZSEJdqukh3Vfp/PZvbbShe6CjlP3pBONuUZJNp44beQTDS1qRWZ2fzc4aHgVm3h5Srhx3BO1DBJsZaITZYwAk/+BWL5i+oMLlcn96PXj/iYoAOdREpeFXWkptJXBDvOX3qlwxyVzlTlkYyXKwqPhQ3+t8TObKj5sVQAkf2ppt8PzOpEZF/h/1SwqnCrfIufCj+KQKxdMy2yK7jnCThNlUkteHv1AMqeyA3YC8FzHMcYMnAm4ODFmPP8oPPYPBYRBBp4LIlPyU+xEMXTJmjKSJjmrdgn+QOYg/px2kZs3riZJC8i/mVFc4aZZQw0hZB3ua30yYOOUIpg2x7MiE83j1c41Jr+5qNltHJjKILqlwhv6A0USDPdoiGgdryg7Dt4HnenHyDv3TIDzBQZ6J9McMEmVCSe6vwAGFrBKb48zKXF+WFZKRAGzIRvKfA/UAIwAvjuj6gQ2nmfAMGY9L4Lyn0AWrz023to4Z4bPflrnWP2QqfjExRGie4AJs9B177pPBl9uuaLj6QN3+JM3TBKrjD4O6mT5wo4x9zyL3xM+KNJyJR2SbMnwwcbFBRqmRLHbE5BQpbyw8PC2UNHh1D7H7U7HVXSR52wNr3nIOaVSY7/WvbArcRes2FBrlngxeEf7Tj9k5blBTvJQda2I3FRELeoP/oJIIlzDIxkjTG/J8uZAxmwlGqo/Wv8cWh0up+yWYuGlLOh9Y+LXJgU1uhJH473Lr7ekjrw8TVSFyfU3xCM8ySgX5ZAbSsDH//zt2gPyeQ8A7TFeV9fjEcxFq4NqvwMuu4GdErX2AKtSz93dYxH/hbYLksdBStCRC3HbPDIBIxu26Ga2KFM2njArWK2RUkoWt/V1eZxsVQfykcp/ZHpXXO9EuKQGoqzR5sHE3ql31BUoBxq5SeMOByrT7JgrRBj53pqoQEbKYzZ+u9DwebWJ9XTrv3Al8IcRb4dSapVTK8WVacDYlmscyGNIkn7T4evk7osU7KhEY0K9XI+iR8OTJjndX2IdMl4mm/untipIH5JGoZ90JrmttvCboEYmCZT8rPFtlYH7FPYOBzHEZw8lat69m6ZMivSpFL/puNjaCbgEd/HvHzSBaC5cIrxlwgB+YDcAQS7PIt2891bWX6NDIYYjd+VaSnodQ5a6iQ/h+5OkZMOP9IG+7kO8p8eSDRVLbhngmAsw9C4wAR/uuDG1NEjppK26Q6fn3zazsMfIFmk5zMPdRd4mYscwA9ByjPcKdCMI+88rm2OXO9ycUGFf8uhf62/wzq/CrsU+xJ26JSx7dEOfQl3m7Qus44zKGVWLATQsi4ti3EDgsVpkC++a+c5W9ejRiturERAbyZ2dz/QzdeuwOQbfHyEem2mLrld34bd8M1kkl34x7CbOH8GcwCDaYWAUymyZqcprYd4Fj4LMGPQIjx4eCKh8WrAoDdsAQlkVyaMNCNYcmvOv4IAFR+RK6XOlRszoqyc01xqxmWlp1n2CeNh+f8a0DtoFJt2PZaxSZ0EuGukNKxafMGc9oRtaKV/6xzOewkWRjoC59LDh6UBvh9HVpqBXqtXzasTQEos2kRD+xz5ldNqiV719SAtfhnEXdwMkeVFGAdQgQFwVItn4Vc9GlgZ35u9xGiBesaCE61S83Suic4ILWx2LyOIEYQ6+IvFLyP2uGFJ3JaJREP67a4TqAty5YUkibyQk42MiOt1BEQlF6sBVnYOkpgyj159uMw9/Ra2jEZ8Vo0aR/6Q7Y+nb23EDfarm+tHveMQ2U9JyHvEZt6sN7itUeWWyyR9wvPziSFLW4HIsKqB16nD3UhU2LxnYQjVcrf8tSOnpflaqc4Z9LtDdBkqTX6+WIQ3TWcvutsQbUl59qMCdoAAAA=="};
 window.__spritesLoaded = function () { SPRITES = window.SPRITES; document.querySelectorAll('canvas.portrait, canvas.ricon').forEach(function (c) { c.removeAttribute('data-drawn'); }); };
 </script>
@@ -5730,30 +6280,13 @@ var SND = (function () {
   var ctx = null,
     master,
     sfx,
-    mus,
-    noiseBuf,
-    musicNodes = null,
-    bellTimer = 0;
+    noiseBuf;
   var mode = 1;
   try {
     var v = localStorage.getItem('abyss-dice-sound3');
     if (v !== null) mode = +v ? 1 : 0;
   } catch (e) {}
-  var ROOT = {
-    tut: 98,
-    c1: 87.3,
-    c2: 73.4,
-    c3: 82.4,
-    c4: 65.4,
-    c5: 55,
-    c6: 92.5,
-    c7: 61.7,
-    c8: 69.3,
-    az: 46.2,
-    title: 55,
-  };
-  var MASTER = 0.32,
-    MUSIC = 0.05;
+  var MASTER = 0.32;
   function init() {
     if (ctx) {
       if (ctx.state === 'suspended') ctx.resume();
@@ -5782,9 +6315,6 @@ var SND = (function () {
     sfx = ctx.createGain();
     sfx.gain.value = 0.6;
     sfx.connect(comp);
-    mus = ctx.createGain();
-    mus.gain.value = 0;
-    mus.connect(comp);
     noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 1.0, ctx.sampleRate);
     var ch = noiseBuf.getChannelData(0);
     for (var i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
@@ -5824,10 +6354,6 @@ var SND = (function () {
     o.start(t0);
     o.stop(t0 + dur + 0.05);
   }
-  function setMusic(on) {
-    if (!ctx || !musicNodes) return;
-    mus.gain.setTargetAtTime(on ? MUSIC : 0, now(), 0.8);
-  }
   var LABEL = ['ปิดเสียง', 'เสียง: เปิด'];
   var api = {
     get on() {
@@ -5857,61 +6383,6 @@ var SND = (function () {
         try {
           fn(now(), arg || 0);
         } catch (e) {}
-    },
-    music: function () {
-      return;
-    },
-    _oldMusic: function (key, boss) {
-      if (!init()) return;
-      var root = ROOT[key] || 55,
-        t = now();
-      if (!musicNodes) {
-        var lp = ctx.createBiquadFilter();
-        lp.type = 'lowpass';
-        lp.frequency.value = 400;
-        lp.Q.value = 0.7;
-        lp.connect(mus);
-        var oscs = [
-          [1, 0.5],
-          [1.5, 0.25],
-          [2.002, 0.18],
-        ].map(function (o) {
-          var os = ctx.createOscillator();
-          os.type = 'sine';
-          os.frequency.value = root * o[0];
-          var g = ctx.createGain();
-          g.gain.value = o[1];
-          os.connect(g);
-          g.connect(lp);
-          os.start();
-          return { os: os, mul: o[0] };
-        });
-        musicNodes = { oscs: oscs, lp: lp, root: root };
-        setMusic(mode === 2);
-        var bell = function () {
-          if (mode === 2 && ctx.state === 'running') {
-            var scale = [2, 2.4, 3, 3.6, 4],
-              f = musicNodes.root * scale[Math.floor(Math.random() * scale.length)],
-              b = now();
-            var o = ctx.createOscillator();
-            o.type = 'sine';
-            o.frequency.value = f;
-            var g = ctx.createGain();
-            env(g, b, 0.05, 0.25, 4);
-            o.connect(g);
-            g.connect(mus);
-            o.start(b);
-            o.stop(b + 4.2);
-          }
-          bellTimer = setTimeout(bell, 9000 + Math.random() * 9000);
-        };
-        bellTimer = setTimeout(bell, 6000);
-      }
-      musicNodes.root = root;
-      musicNodes.oscs.forEach(function (o) {
-        o.os.frequency.setTargetAtTime(root * o.mul, t, 1.5);
-      });
-      musicNodes.lp.frequency.setTargetAtTime(boss ? 650 : 400, t, 1.5);
     },
   };
   var SFX = {
@@ -6176,6 +6647,13 @@ function resumeRun() {
   if (sv.screen === 'battle' && sv.battle) {
     battle = sv.battle;
     battle.busy = false;
+    const e = battle.e;
+    if (!e.chs) {
+      // saved before the rules moved to src/rules: fill in what phase 2 needs
+      e.chs = { atkMul: run.ch.atkMul, atkAdd: run.ch.atkAdd, hpMul: run.ch.hpMul };
+      e.atkCurse = curseMod(run.curse || 0).atk;
+    }
+    battle.turn = battle.turn || 1;
     show('battle');
     render(false);
   } else if (sv.screen === 'reward') showReward(true);
@@ -6284,7 +6762,6 @@ function show(id) {
     'rshop',
   ].forEach(s => ($('#s-' + s).hidden = s !== id));
   window.scrollTo(0, 0);
-  if (typeof musicFor === 'function') musicFor();
   if (typeof paintRunbar === 'function') paintRunbar(id);
 }
 const RUNBAR_ON = ['choose', 'reward', 'event', 'rshop', 'inter'];
@@ -6359,10 +6836,7 @@ function sigil(name, col) {
 function upLv(id) {
   return (run && run.ups && run.ups[id]) || 0;
 }
-function upFace(f, id) {
-  const lv = upLv(id);
-  return lv && f.t !== 'none' && f.t !== 'mad' ? { ...f, v: f.v + lv } : f;
-}
+const upFace = (f, id) => RULES.upFace(f, id, run || {});
 function dieCard(id, btnLabel, btnAttr) {
   const d = DICE[id],
     lv = upLv(id);
@@ -6968,8 +7442,7 @@ function interScreen(resumed) {
     nextI = run.nextI,
     nx = CHAPTERS[nextI];
   if (!resumed) {
-    run.hp = Math.min(run.maxHp, run.hp + REST.hp);
-    run.san = Math.min(run.maxSan, run.san + REST.san);
+    RULES.restBetween(run);
     const pos = RUN_ORDER.indexOf(run.ci);
     if (pos > REC.best) {
       REC.best = pos;
@@ -7009,28 +7482,24 @@ function onward() {
     beginStage();
   });
 }
+// labels for the three foe choices; hp and coin numbers are in RULES.ECON.rank
 const RANK = {
   1: {
     l: 'ง่าย',
     c: 'var(--verd)',
-    hp: 1,
-    coin: 1,
     reward: 'อสูรระดับต่ำกว่าปกติ 2 ตัวให้เลือก 1 · เลือด +3 · เงิน 1',
   },
-  2: { l: 'ปกติ', c: 'var(--steel)', hp: 1, coin: 2, reward: 'อสูร 3 ตัวให้เลือก 1 · เงิน 2' },
+  2: { l: 'ปกติ', c: 'var(--steel)', reward: 'อสูร 3 ตัวให้เลือก 1 · เงิน 2' },
   3: {
     l: 'อันตราย',
     c: 'var(--blood)',
-    hp: 0.85,
-    coin: 4,
     reward: 'อสูรระดับสูงขึ้น เลือกได้ 2 ตัว · เลือด +5 · สติ +2 · เงิน 4',
   },
 };
-const WIN_HEAL = 3,
-  WIN_SAN = 3,
-  BOSS_COIN = 6,
-  BOSS_MAXHP = 5,
-  REST = { hp: 10, san: 4 };
+const WIN_HEAL = RULES.ECON.winHeal,
+  WIN_SAN = RULES.ECON.winSan,
+  BOSS_MAXHP = RULES.ECON.bossMaxHp,
+  REST = RULES.ECON.rest;
 const isBossStage = () => run.ch.pool && run.stage === stagesOf(run.ch) - 1;
 function beginStage() {
   const ch = run.ch;
@@ -7045,32 +7514,10 @@ function beginStage() {
   }
   showChoice();
 }
-function foeHp(key, rank) {
-  const ch = run.ch,
-    E = FOES[key];
-  return Math.round(
-    E.hp *
-      ch.hpMul *
-      (1 + 0.04 * run.stage) *
-      (E.boss ? ch.bossHp || 1 : ch.pool ? RANK[rank].hp : 1) *
-      curseMod(run.curse || 0).hp
-  );
-}
-function scalePart(p, hpScale) {
-  return scaleFoePart(p, run.ch, curseMod(run.curse || 0).atk, hpScale);
-}
-function foeTrait(key, maxHp) {
-  return FOES[key].boss || run.ch.tut
-    ? null
-    : traitOf(key, { L: run.ch.level || 0, maxHp, atkMul: run.ch.atkMul || 1 });
-}
-function bossNums(E, hp) {
-  const m = run.ch.atkMul || 1;
-  return {
-    feast: E.feast ? Math.round(E.feast * m) : 0,
-    regen: E.regen ? Math.max(1, Math.round(((E.regen * hp) / E.hp) * 0.7)) : 0,
-  };
-}
+// numbers the choose-a-foe screen shows (the battle itself builds the foe in RULES.newFoe)
+const foeHp = (key, rank) => RULES.foeHp(run.ch, run.stage, key, rank, run.curse);
+const scalePart = (p, hpScale) => scaleFoePart(p, run.ch, curseMod(run.curse || 0).atk, hpScale);
+const foeTrait = (key, maxHp) => RULES.foeTrait(run.ch, key, maxHp);
 function fillSkill(text, nums) {
   return text.replace(/\{(\w+)\}/g, (_, k) =>
     nums && nums[k] != null ? nums[k] : k === 'feast' ? 3 : k === 'regen' ? 4 : '?'
@@ -7087,9 +7534,7 @@ function traitBox(tr) {
     ? `<p class="btrait" data-tip="${escTip(`<b>นิสัย · ${tr.name}</b>${tr.text}`)}"><b>นิสัย · ${tr.name}</b> ${tr.text}</p>`
     : '';
 }
-function restAmt() {
-  return curseMod(run.curse || 0).rest;
-}
+const restAmt = () => RULES.restPickHp(run.curse);
 function intentIcons(intents, hpScale) {
   return intents
     .map(it =>
@@ -7143,513 +7588,279 @@ function showChoice() {
   saveRun('choose');
 }
 
-/* ---------- battle: turns, rolling, resolve, enemy turn, win / lose ---------- */
+/* ---------- battle: the rules live in src/rules/rules.js; this file shows them ---------- */
+const curIntent = () => RULES.curIntent(battle);
+const enraged = () => RULES.enraged(battle);
+const atkValue = v => RULES.atkValue(battle, run, v);
+const tally = () => RULES.tally(battle, run);
+const bump = (el, cls) => {
+  if (!el) return;
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+};
+const later = (ms, fn) => setTimeout(fn, ms);
+const endBy = (out, ms) => later(ms, out === 'win' ? win : () => lose(out));
+
 function startBattle(key) {
-  const ch = run.ch,
-    E = FOES[key];
+  const ch = run.ch;
   run.foeKey = key;
   run.path[run.stage] = { key, rank: run.rank };
-  let hp = foeHp(key, run.rank);
-  if (run.cursedNext) {
-    hp = Math.round(hp * 1.25);
-    run.cursedNext = false;
-  }
+  const e = RULES.newFoe(ch, key, { stage: run.stage, rank: run.rank, curse: run.curse, cursed: run.cursedNext });
+  run.cursedNext = false;
   run.extraReroll = 0;
-  if (E.boss) tip('boss');
+  if (e.boss) tip('boss');
   else tip('trait');
   cxSee('f:' + key);
   cxCount('fought', 'f:' + key);
-  const hs = hp / E.hp,
-    bn = bossNums(E, hp);
-  battle = {
-    e: {
-      ...E,
-      hp,
-      maxHp: hp,
-      hs,
-      intents: E.intents.map(it => it.map(p => scalePart(p, hs))),
-      block: 0,
-      poison: 0,
-      weak: 0,
-      str: 0,
-      ii: 0,
-      t: 0,
-      phased: false,
-      trait: foeTrait(key, hp),
-      feast: bn.feast,
-      regen: bn.regen,
-      skill: E.skill ? { name: E.skill.name, text: fillSkill(E.skill.text, bn) } : null,
-    },
-    rolls: [],
-    rerolls: 2,
-    bonusRR: run.extraReroll || 0,
-    pBlock: 0,
-    bleed: 0,
-    freezeNext: 0,
-    dazeNext: 0,
-    busy: false,
-    log: [],
-  };
+  e.skill = e.skill ? { name: e.skill.name, text: fillSkill(e.skill.text, e) } : null;
+  battle = { ...RULES.newBattle(e, run), busy: false, log: [] };
   if (ch.tut && run.stage === 2) run.san = Math.min(run.san, 8);
   run.tut.extra = null;
-  log(`${E.name} ปรากฏตัว`);
-  if (E.boss) setTimeout(() => SND.play('boss'), 150);
+  log(`${e.name} ปรากฏตัว`);
+  if (e.boss) later(150, () => SND.play('boss'));
   show('battle');
   startTurn();
 }
-function rollOne(r) {
-  const d = DICE[r.id],
-    sk = SKILLS[r.id] || {};
-  let f = { ...d.faces[R(6)] };
-  r.dist = null;
-  if (run.san <= 8 && !sk.noDistort && Math.random() < 0.3) {
-    if (f.t !== 'none' && f.t !== 'mad' && Math.random() < 0.5) {
-      f.v *= 2;
-      r.dist = 'pow';
-    } else {
-      f = F('mad', 1);
-      r.dist = 'mad';
-    }
-  } else f = upFace(f, r.id);
-  r.face = f;
-}
+
 function startTurn() {
-  battle.turn = (battle.turn || 0) + 1;
-  if (battle.bleed > 0) {
-    run.hp = Math.max(0, run.hp - battle.bleed);
-    log(`เลือดไหล −${battle.bleed}`);
-    floatNum('#me-hp', '−' + battle.bleed + ' เลือดไหล', 'hit');
-    SND.play('hurt', battle.bleed);
-    battle.bleed--;
-    if (run.hp <= 0) {
-      render(false);
-      return setTimeout(() => lose('body'), 500);
-    }
+  const { ev, out } = RULES.startTurn(battle, run);
+  for (const x of ev) {
+    if (x.k === 'bleed') {
+      log(`เลือดไหล −${x.v}`);
+      floatNum('#me-hp', '−' + x.v + ' เลือดไหล', 'hit');
+      SND.play('hurt', x.v);
+    } else if (x.k === 'relicOff')
+      log(`${battle.e.name} ปิดเครื่องราง: ${x.idx.map(i => RELICS[run.relics[i].id].name).join(', ')}`);
+    else if (x.k === 'frozen') log(`เต๋าของคุณถูกตรึง ${x.n} ลูก`);
+    else if (x.k === 'dazed') log(`คุณมึนงง ทอยใหม่ได้ ${x.rerolls} ครั้ง`);
+    else if (x.k === 'banish') log(`${battle.e.name} ส่งเต๋าของคุณไปมิติอื่น ${x.n} ลูก`);
+  }
+  if (out) {
+    render(false);
+    return endBy(out, 500);
   }
   SND.play('dice', run.dice.length);
-  battle.pBlock = 0;
-  battle.rerolls =
-    Math.min(battle.e.maxReroll != null ? battle.e.maxReroll : 2, Math.max(0, 2 - battle.dazeNext)) +
-    (battle.bonusRR || 0);
-  if (run.relics) {
-    run.relics.forEach(r => (r.off = false));
-    if (battle.e.relicOff && run.relics.length) {
-      const idx = run.relics
-        .map((_, i) => i)
-        .sort(() => Math.random() - 0.5)
-        .slice(0, battle.e.relicOff);
-      idx.forEach(i => (run.relics[i].off = true));
-      log(`${battle.e.name} ปิดเครื่องราง: ${idx.map(i => RELICS[run.relics[i].id].name).join(', ')}`);
-    }
-  }
-  battle.rolls = run.dice.map(id => ({ id, held: false, frozen: false, fresh: true }));
-  battle.rolls.forEach(rollOne);
-  const idx = [...battle.rolls.keys()]
-    .filter(i => !(SKILLS[battle.rolls[i].id] || {}).noFreeze)
-    .sort(() => Math.random() - 0.5)
-    .slice(0, battle.freezeNext);
-  idx.forEach(i => (battle.rolls[i].frozen = true));
-  if (battle.freezeNext) log(`เต๋าของคุณถูกตรึง ${idx.length} ลูก`);
-  if (battle.dazeNext) log(`คุณมึนงง ทอยใหม่ได้ ${battle.rerolls} ครั้ง`);
-  battle.freezeNext = 0;
-  battle.dazeNext = 0;
-  if (battle.e.chaos) {
-    const all = Object.keys(DICE);
-    const free = [...battle.rolls.keys()]
-      .filter(i => !battle.rolls[i].frozen)
-      .sort(() => Math.random() - 0.5)
-      .slice(0, battle.e.chaos);
-    free.forEach(i => {
-      const r = battle.rolls[i];
-      r.face = { ...DICE[all[R(all.length)]].faces[R(6)] };
-      r.chaos = true;
-      r.dist = null;
-    });
-  }
-  if (battle.e.banish) {
-    const free = [...battle.rolls.keys()]
-      .filter(i => !battle.rolls[i].frozen)
-      .sort(() => Math.random() - 0.5)
-      .slice(0, battle.e.banish);
-    free.forEach(i => {
-      battle.rolls[i].banished = true;
-    });
-    if (free.length) log(`${battle.e.name} ส่งเต๋าของคุณไปมิติอื่น ${free.length} ลูก`);
-  }
   battle.busy = false;
   render(true);
 }
+
 function reroll() {
-  if (!battle.busy && battle.rerolls > 0)
-    SND.play('dice', battle.rolls.filter(r => !r.held && !r.frozen && !r.banished).length);
   if (battle.busy || battle.rerolls <= 0) return;
-  if (battle.rolls.every(r => r.held || r.frozen || r.banished)) return;
-  battle.rolls.forEach(r => {
-    if (r.held || r.frozen || r.banished) return;
-    const old = { face: r.face, dist: r.dist };
-    rollOne(r);
-    r.fresh = false;
-    r.chaos = false;
-    if ((SKILLS[r.id] || {}).keepBetter && faceScore(old.face) > faceScore(r.face)) {
-      r.face = old.face;
-      r.dist = old.dist;
-      r.kept = true;
-    } else r.kept = false;
-  });
+  const free = battle.rolls.filter(RULES.canReroll);
+  if (!free.length) return;
+  SND.play('dice', free.length);
+  free.forEach(r => RULES.rerollDie(r, run));
   battle.rerolls--;
   coachEvent('reroll');
   render(true);
 }
-function tally() {
-  const e = battle.e;
-  const T = computeTally(battle.rolls, {
-    eHp: e.hp / e.maxHp,
-    ePoison: e.poison,
-    eWeak: e.weak,
-    san: run.san,
-    maxSan: run.maxSan,
-    armor: e.armor || (e.trait && e.trait.key === 'hide' ? e.trait.v : 0),
-    lull: !!e.lull,
-    comboMin: e.comboMin,
-  });
-  T.base = T.s.atk;
-  T.steps = [];
-  T.steps = applyRelics(run.relics || [], {
-    noHeal: e.noHeal,
-    noSan: e.noSan,
-    halfSan: e.halfSan,
-    noMul: e.noMulAsleep && !e.phased,
-    shuffle: e.shuffleRelics,
-    s: T.s,
-    rolls: battle.rolls,
-    cnt: T.cnt,
-    combos: T.combos,
-    lv: T.lv,
-    san: run.san,
-    maxSan: run.maxSan,
-    hp: run.hp,
-    maxHp: run.maxHp,
-    eHp: e.hp / e.maxHp,
-    ePoison: e.poison,
-    rerollsLeft: battle.rerolls,
-    turn: battle.turn || 1,
-  });
-  return T;
-}
-function curIntent() {
-  const e = battle.e;
-  return e.intents[e.ii % e.intents.length];
-}
-function enraged() {
-  const e = battle.e;
-  return !!(e.trait && e.trait.key === 'enrage' && e.hp < e.maxHp / 2);
-}
-function atkValue(v) {
-  const e = battle.e;
-  let x = v + e.str + (e.feast && run.hp < run.maxHp / 2 ? e.feast : 0);
-  if (enraged()) x = Math.floor(x * 1.5);
-  if (e.weak > 0) x = Math.floor(x * 0.7);
-  return x;
-}
 
+// your dice: skill dice glow one by one, then each relic adds its part to the score box
 function resolve() {
   if (battle.busy) return;
   battle.busy = true;
   const T = tally();
   render(false);
-  const sk = battle.rolls.map((r, i) => ({ r, i })).filter(x => x.r.skTag && SKILLS[x.r.id] && !x.r.banished);
   const SK = 380;
+  const sk = battle.rolls.map((r, i) => ({ r, i })).filter(x => x.r.skTag && SKILLS[x.r.id] && !x.r.banished);
   sk.forEach((x, k) =>
-    setTimeout(() => {
+    later(k * SK, () => {
       const el = document.querySelector(`#tray [data-i="${x.i}"]`);
       if (el) {
-        el.classList.remove('skfire');
-        void el.offsetWidth;
-        el.classList.add('skfire');
+        bump(el, 'skfire');
         floatNum(el, `${SKILLS[x.r.id].name} ${x.r.skTag}`, 'skill');
       }
       SND.play('tick', k + 2);
-    }, k * SK)
+    })
   );
   const lead = sk.length * SK;
-  if (!T.steps.length) return setTimeout(() => applyResult(T), lead);
+  if (!T.steps.length) return later(lead, () => applyResult(T));
   const sb = $('#scorebox'),
     n = $('#sb-n');
-  setTimeout(() => {
+  later(lead, () => {
     sb.hidden = false;
     n.textContent = T.base;
-    sb.classList.remove('pop');
-    void sb.offsetWidth;
-    sb.classList.add('pop');
-  }, lead);
+    bump(sb, 'pop');
+  });
   T.steps.forEach((st, k) =>
-    setTimeout(
-      () => {
-        const el = document.querySelector(`#relicbar [data-ri="${st.i}"]`);
-        if (el) {
-          el.classList.remove('fire');
-          void el.offsetWidth;
-          el.classList.add('fire');
-          floatNum(el, st.t, st.t.startsWith('×') ? 'mult' : 'add');
-        }
-        if (st.atk !== st.from) {
-          n.textContent = st.atk;
-          n.classList.remove('bump');
-          void n.offsetWidth;
-          n.classList.add('bump');
-        }
-        SND.play('tick', k);
-      },
-      lead + 260 + k * 300
-    )
+    later(lead + 260 + k * 300, () => {
+      const el = document.querySelector(`#relicbar [data-ri="${st.i}"]`);
+      if (el) {
+        bump(el, 'fire');
+        floatNum(el, st.t, st.t.startsWith('×') ? 'mult' : 'add');
+      }
+      if (st.atk !== st.from) {
+        n.textContent = st.atk;
+        bump(n, 'bump');
+      }
+      SND.play('tick', k);
+    })
   );
-  setTimeout(
-    () => {
-      sb.hidden = true;
-      applyResult(T);
-    },
-    lead + 520 + T.steps.length * 300
-  );
+  later(lead + 520 + T.steps.length * 300, () => {
+    sb.hidden = true;
+    applyResult(T);
+  });
 }
+
 function applyResult(T) {
-  const { s, combos, lv } = T;
   const e = battle.e;
-  if (combos.length && run.relics) {
-    run.relics.forEach(r => {
-      if (RELICS[r.id].grow === 'combo') r.n = (r.n || 0) + 1;
-    });
-    if (hasRelic(run.relics, 'golddie')) {
-      run.coins += 2;
-      floatNum('#coins', '+2', 'coin');
-    }
-  }
+  const { ev, out } = RULES.playerResolve(battle, run, T);
   const parts = [];
-  const top = combos.length ? Math.max(...combos.map(k => lv[k])) : 0;
-  if (combos.length) {
-    parts.push(combos.map(k => `${COMBO_NAME[lv[k]]} ${TYPES[k].l} ×${COMBO_MULT[lv[k]]}`).join(', '));
-    coachEvent('combo');
-  }
-  if (s.atk) {
-    const absorbed = Math.min(e.block, s.atk),
-      dealt = s.atk - absorbed;
-    e.block -= absorbed;
-    e.hp -= dealt;
-    const crit = dealt >= 20 || (lv.atk || 0) >= 2;
-    if (dealt > 0) floatNum('#enemy', '−' + dealt, crit ? 'hit crit' : 'hit');
-    else floatNum('#enemy', 'โล่กัน', 'blk');
-    SND.play(dealt > 0 ? 'hit' : 'block', dealt);
-    if (crit) quake(top >= 3 ? 2 : 1);
-    parts.push(`โจมตี ${s.atk}` + (absorbed ? ` (โล่กัน ${absorbed})` : ''));
-    const el = $('#enemy');
-    el.classList.remove('hit');
-    void el.offsetWidth;
-    el.classList.add('hit');
-    if (dealt > 0 && e.trait && e.trait.key === 'thorns' && !hasRelic(run.relics, 'salt')) {
-      run.hp = Math.max(0, run.hp - e.trait.v);
-      parts.push(`โดนหนามพิษ −${e.trait.v}`);
-      setTimeout(() => {
-        floatNum('#me-hp', '−' + e.trait.v + ' หนาม', 'hit');
-        SND.play('hurt', e.trait.v);
-      }, 300);
+  let top = 0;
+  for (const x of ev) {
+    if (x.k === 'golddie') floatNum('#coins', '+' + x.v, 'coin');
+    else if (x.k === 'combo') {
+      top = x.top;
+      parts.push(x.combos.map(k => `${COMBO_NAME[x.lv[k]]} ${TYPES[k].l} ×${COMBO_MULT[x.lv[k]]}`).join(', '));
+      coachEvent('combo');
+    } else if (x.k === 'atk') {
+      if (x.dealt > 0) floatNum('#enemy', '−' + x.dealt, x.crit ? 'hit crit' : 'hit');
+      else floatNum('#enemy', 'โล่กัน', 'blk');
+      SND.play(x.dealt > 0 ? 'hit' : 'block', x.dealt);
+      if (x.crit) quake(top >= 3 ? 2 : 1);
+      parts.push(`โจมตี ${x.v}` + (x.absorbed ? ` (โล่กัน ${x.absorbed})` : ''));
+      bump($('#enemy'), 'hit');
+    } else if (x.k === 'thorns') {
+      parts.push(`โดนหนามพิษ −${x.v}`);
+      later(300, () => {
+        floatNum('#me-hp', '−' + x.v + ' หนาม', 'hit');
+        SND.play('hurt', x.v);
+      });
+    } else if (x.k === 'vengeful') {
+      parts.push(`${e.name}แค้น พลัง +${x.v}`);
+      later(250, () => floatNum('#enemy', 'แค้น +' + x.v, 'hit'));
+    } else if (x.k === 'blk') {
+      parts.push(`โล่ ${x.v}`);
+      later(120, () => SND.play('block'));
+    } else if (x.k === 'poison') {
+      parts.push(`พิษ +${x.v}`);
+      later(180, () => SND.play('poison'));
+    } else if (x.k === 'weak') parts.push(`อ่อนแรง ${x.v} เทิร์น`);
+    else if (x.k === 'heal') {
+      parts.push(`ฟื้น ${x.v}`);
+      floatNum('#me-hp', '+' + x.v, 'heal');
+      later(220, () => SND.play('heal'));
+    } else if (x.k === 'san') {
+      parts.push(`สติ +${x.v}`);
+      later(260, () => SND.play('san'));
+    } else if (x.k === 'mad') {
+      parts.push(`สติ −${x.v}`);
+      floatNum('#me-sn', '−' + x.v, 'mad');
+      later(200, () => SND.play('mad'));
     }
   }
-  if (!s.atk && e.trait && e.trait.key === 'vengeful' && e.hp > 0) {
-    e.str += e.trait.v;
-    parts.push(`${e.name}แค้น พลัง +${e.trait.v}`);
-    setTimeout(() => floatNum('#enemy', 'แค้น +' + e.trait.v, 'hit'), 250);
-  }
-  if (s.blk) {
-    battle.pBlock += s.blk;
-    parts.push(`โล่ ${s.blk}`);
-    setTimeout(() => SND.play('block'), 120);
-  }
-  if (s.poison) {
-    e.poison += s.poison;
-    parts.push(`พิษ +${s.poison}`);
-    setTimeout(() => SND.play('poison'), 180);
-  }
-  if (s.weak) {
-    e.weak += s.weak;
-    parts.push(`อ่อนแรง ${s.weak} เทิร์น`);
-  }
-  if (s.heal) {
-    run.hp = Math.min(run.maxHp, run.hp + s.heal);
-    parts.push(`ฟื้น ${s.heal}`);
-    floatNum('#me-hp', '+' + s.heal, 'heal');
-    setTimeout(() => SND.play('heal'), 220);
-  }
-  if (s.san) {
-    run.san = Math.min(run.maxSan, run.san + s.san);
-    parts.push(`สติ +${s.san}`);
-    setTimeout(() => SND.play('san'), 260);
-  }
-  if (s.mad) {
-    run.san = Math.max(0, run.san - s.mad);
-    parts.push(`สติ −${s.mad}`);
-    floatNum('#me-sn', '−' + s.mad, 'mad');
-    setTimeout(() => SND.play('mad'), 200);
-  }
-  if (s.blk) floatNum('#pstat', '+' + s.blk + ' โล่', 'blk');
+  if (T.s.blk) floatNum('#pstat', '+' + T.s.blk + ' โล่', 'blk');
   log('คุณ: ' + (parts.join(' · ') || 'ไม่มีผลอะไรเลย'));
   coachEvent('resolve');
   render(false);
-  if (e.hp <= 0) return setTimeout(win, 700);
-  if (run.hp <= 0) return setTimeout(() => lose('body'), 700);
-  if (run.san <= 0) return setTimeout(() => lose('mind'), 700);
-  checkPhase();
-  setTimeout(enemyTurn, 700);
+  if (out) return endBy(out, 700);
+  if (ev.some(x => x.k === 'phase')) phaseShown();
+  later(700, enemyTurn);
+}
+function phaseShown() {
+  log(`${battle.e.name}! ท่าทั้งหมดเปลี่ยนไป`);
+  render(false);
 }
 
-function checkPhase() {
-  const e = battle.e;
-  if (e.phase2 && !e.phased && e.hp > 0 && e.hp <= e.maxHp * e.phase2.at) {
-    e.phased = true;
-    e.ii = 0;
-    e.intents = e.phase2.intents.map(it => it.map(p => scalePart(p, e.hs)));
-    e.name = e.phase2.name;
-    log(`${e.name}! ท่าทั้งหมดเปลี่ยนไป`);
-    render(false);
-  }
-}
 function enemyTurn() {
-  const e = battle.e;
-  e.block = 0;
-  if (e.poison > 0) {
-    e.hp -= e.poison;
-    log(`${e.name} โดนพิษ ${e.poison}`);
-    if (!bagHas(run.dice, 'poisonStay')) e.poison--;
-    if (e.hp <= 0) {
-      render(false);
-      return setTimeout(win, 600);
-    }
-    checkPhase();
-  }
-  if (e.regen && e.hp < e.maxHp) {
-    const h = Math.min(e.regen, e.maxHp - e.hp);
-    e.hp += h;
-    log(`${e.name} ฟื้นเลือด ${h}`);
-  }
-  const parts = [],
-    tr = e.trait;
-  if (curIntent().some(p => p.t === 'atk' || p.t === 'drain')) {
-    const pc = $('#enemy .portrait');
-    if (pc) {
-      pc.classList.remove('lunge');
-      void pc.offsetWidth;
-      pc.classList.add('lunge');
-    }
-  }
-  for (const p of curIntent()) {
-    if (p.t === 'atk' || p.t === 'drain') {
-      const dmg = atkValue(p.v);
-      const absorbed = Math.min(battle.pBlock, dmg);
-      const taken = dmg - absorbed;
-      battle.pBlock -= absorbed;
-      run.hp = Math.max(0, run.hp - taken);
-      SND.play(taken ? 'hurt' : 'block', taken);
-      if (taken >= 12) quake(1);
-      if (taken) {
-        floatNum('#me-hp', '−' + taken, 'hit');
-        const sb = $('#s-battle');
-        sb.classList.remove('hurt');
-        void sb.offsetWidth;
-        sb.classList.add('hurt');
-      }
-      if (p.t === 'drain') {
-        e.hp = Math.min(e.maxHp, e.hp + taken);
-        parts.push(`ดูดเลือด ${dmg}` + (taken ? ` ฟื้น ${taken}` : ' (โล่กันหมด)'));
-      } else parts.push(`โจมตี ${dmg}` + (absorbed ? ` (โล่กัน ${absorbed})` : ''));
-      if (taken > 0 && tr && tr.key === 'thief' && run.coins > 0 && !hasRelic(run.relics, 'salt')) {
-        const st = Math.min(run.coins, tr.v);
-        run.coins -= st;
-        parts.push(`ขโมยเงิน ${st}`);
-        setTimeout(() => floatNum('#coins', '−' + st + ' ◉', 'hit'), 250);
-      }
-      if (taken > 0 && tr && tr.key === 'bleed' && !hasRelic(run.relics, 'salt')) {
-        battle.bleed += tr.v;
-        parts.push(`เลือดไหล +${tr.v}`);
-      }
-    } else if (p.t === 'blk') {
-      e.block += p.v;
-      parts.push(`ตั้งโล่ ${p.v}`);
-    } else if (p.t === 'mad') {
-      run.san = Math.max(0, run.san - p.v);
-      parts.push(`กัดกินสติ ${p.v}`);
-      floatNum('#me-sn', '−' + p.v, 'mad');
-      SND.play('mad');
-    } else if (p.t === 'str') {
-      e.str += p.v;
-      parts.push(`เพิ่มพลัง +${p.v}`);
-    } else if (p.t === 'freeze') {
-      battle.freezeNext = Math.min(run.dice.length, p.v);
-      parts.push(`ตรึงเต๋า ${p.v} ลูกเทิร์นหน้า`);
-      coachEvent('freeze');
-    } else if (p.t === 'daze') {
-      battle.dazeNext = p.v;
-      parts.push('ทำให้คุณมึน');
-      coachEvent('daze');
+  const e = battle.e,
+    nameBefore = e.name; // poison is logged under the old name if it pushes a boss into phase 2
+  const { ev, out } = RULES.enemyTurn(battle, run);
+  const parts = [];
+  for (const x of ev) {
+    switch (x.k) {
+      case 'poisoned':
+        log(`${nameBefore} โดนพิษ ${x.v}`);
+        break;
+      case 'phase':
+        phaseShown();
+        break;
+      case 'regen':
+        log(`${e.name} ฟื้นเลือด ${x.v}`);
+        break;
+      case 'lunge':
+        bump($('#enemy .portrait'), 'lunge');
+        break;
+      case 'hit':
+      case 'drain':
+        SND.play(x.taken ? 'hurt' : 'block', x.taken);
+        if (x.taken >= 12) quake(1);
+        if (x.taken) {
+          floatNum('#me-hp', '−' + x.taken, 'hit');
+          bump($('#s-battle'), 'hurt');
+        }
+        if (x.k === 'drain') parts.push(`ดูดเลือด ${x.dmg}` + (x.taken ? ` ฟื้น ${x.taken}` : ' (โล่กันหมด)'));
+        else parts.push(`โจมตี ${x.dmg}` + (x.absorbed ? ` (โล่กัน ${x.absorbed})` : ''));
+        break;
+      case 'steal':
+        parts.push(`ขโมยเงิน ${x.v}`);
+        later(250, () => floatNum('#coins', '−' + x.v + ' ◉', 'hit'));
+        break;
+      case 'bleeding':
+        parts.push(`เลือดไหล +${x.v}`);
+        break;
+      case 'eblk':
+        parts.push(`ตั้งโล่ ${x.v}`);
+        break;
+      case 'emad':
+        parts.push(`กัดกินสติ ${x.v}`);
+        floatNum('#me-sn', '−' + x.v, 'mad');
+        SND.play('mad');
+        break;
+      case 'str':
+        parts.push(`เพิ่มพลัง +${x.v}`);
+        break;
+      case 'freeze':
+        parts.push(`ตรึงเต๋า ${x.v} ลูกเทิร์นหน้า`);
+        coachEvent('freeze');
+        break;
+      case 'daze':
+        parts.push('ทำให้คุณมึน');
+        coachEvent('daze');
+        break;
+      case 'harden':
+        parts.push(`เปลือกแข็ง โล่ +${x.v}`);
+        later(200, () => floatNum('#enemy', '+' + x.v + ' โล่', 'blk'));
+        break;
+      case 'grow':
+        parts.push(`โตขึ้น พลัง +${x.v}`);
+        later(200, () => floatNum('#enemy', 'พลัง +' + x.v, 'hit'));
+        break;
+      case 'dread':
+        parts.push(`ความหลอน สติ −${x.v}`);
+        floatNum('#me-sn', '−' + x.v, 'mad');
+        break;
+      case 'aura':
+        parts.push(`สัญลักษณ์สีเหลืองกัดกินสติ ${x.v}`);
+        break;
+      case 'wave':
+        parts.push('คลื่นยักษ์! ตรึงเต๋าทั้งถุงเทิร์นหน้า');
+        break;
     }
   }
-  e.t++;
-  if (tr && tr.key === 'harden') {
-    e.block += tr.v;
-    parts.push(`เปลือกแข็ง โล่ +${tr.v}`);
-    setTimeout(() => floatNum('#enemy', '+' + tr.v + ' โล่', 'blk'), 200);
+  if (out === 'win') {
+    render(false);
+    return endBy(out, 600);
   }
-  if (tr && tr.key === 'grow') {
-    e.str += tr.v;
-    parts.push(`โตขึ้น พลัง +${tr.v}`);
-    setTimeout(() => floatNum('#enemy', 'พลัง +' + tr.v, 'hit'), 200);
-  }
-  if (tr && tr.key === 'dread') {
-    run.san = Math.max(0, run.san - tr.v);
-    parts.push(`ความหลอน สติ −${tr.v}`);
-    floatNum('#me-sn', '−' + tr.v, 'mad');
-  }
-  if (e.aura) {
-    run.san = Math.max(0, run.san - e.aura);
-    parts.push(`สัญลักษณ์สีเหลืองกัดกินสติ ${e.aura}`);
-  }
-  if (e.wave && e.t % e.wave === 0) {
-    battle.freezeNext = run.dice.length;
-    parts.push('คลื่นยักษ์! ตรึงเต๋าทั้งถุงเทิร์นหน้า');
-  }
-  if (e.weak > 0) e.weak--;
-  e.ii = e.randomIntent ? R(e.intents.length) : e.ii + 1;
   log(`${e.name}: ` + parts.join(' · '));
   coachEvent('enemy');
   render(false);
-  if (run.hp <= 0) return setTimeout(() => lose('body'), 600);
-  if (run.san <= 0) return setTimeout(() => lose('mind'), 600);
-  setTimeout(startTurn, 550);
+  if (out) return endBy(out, 600);
+  later(550, startTurn);
 }
 
 function win() {
   cxCount('won', 'f:' + run.foeKey);
-  (run.relics || []).forEach(r => (r.off = false));
-  if (run.mode === 'run') {
-    const boss = !!FOES[run.foeKey].boss,
-      it = interest(run.coins, run.relics);
-    const g =
-      (boss ? BOSS_COIN : RANK[run.rank || 2].coin) +
-      (hasRelic(run.relics, 'coin') ? 1 : 0) +
-      (hasRelic(run.relics, 'bounty') && (boss || run.rank === 3) ? 3 : 0);
-    if (boss) {
-      run.maxHp += BOSS_MAXHP;
-      run.hp += BOSS_MAXHP;
-    }
-    run.coins += g + it;
-    run.lastGain = { g, it };
-    run.relics.forEach(r => {
-      if (RELICS[r.id].grow === 'kill') r.n = (r.n || 0) + 1;
-    });
-    setTimeout(() => SND.play('coin'), 350);
+  const boss = !!FOES[run.foeKey].boss;
+  const gain = RULES.winSpoils(run, { boss, rank: run.rank, inRun: run.mode === 'run' });
+  if (gain) {
+    run.lastGain = gain;
+    later(350, () => SND.play('coin'));
   }
   run.cleared = (run.cleared || 0) + 1;
-  if (FOES[run.foeKey].boss) run.bosses = (run.bosses || 0) + 1;
-  SND.play(FOES[run.foeKey].boss ? 'chapter' : 'win');
-  run.san = Math.min(run.maxSan, run.san + WIN_SAN);
-  run.hp = Math.min(run.maxHp, run.hp + WIN_HEAL);
+  if (boss) run.bosses = (run.bosses || 0) + 1;
+  SND.play(boss ? 'chapter' : 'win');
   if (run.stage === stagesOf(run.ch) - 1) {
     if (run.mode !== 'run') return endScreen(true);
     if (run.ch.secret) return showPages(['az_close'], () => endScreen(true, 'az'), true);
@@ -7665,14 +7876,7 @@ function win() {
     }
     return showPages(close, () => endScreen(true), true);
   }
-  const base = run.ch.tiers[run.stage] || [1];
-  if (run.ch.pool && run.rank === 1)
-    run.reward = { tiers: [Math.max(1, Math.min(...base) - 1)], n: 2, picks: 1, heal: 3, san: 0 };
-  else if (run.ch.pool && run.rank === 3)
-    run.reward = { tiers: [...new Set(base.map(t => Math.min(3, t + 1)))], n: 3, picks: 2, heal: 5, san: 2 };
-  else run.reward = { tiers: base, n: 3, picks: 1, heal: 0, san: 0 };
-  run.hp = Math.min(run.maxHp, run.hp + run.reward.heal);
-  run.san = Math.min(run.maxSan, run.san + run.reward.san);
+  run.reward = RULES.stageReward(run, run.ch, run.stage, run.rank);
   run.picksLeft = run.reward.picks;
   run.taken = 0;
   showReward();
@@ -7767,80 +7971,39 @@ function nextStage() {
 }
 
 /* ---------- events ---------- */
+// wraps RULES.eventApi: same state changes, plus the text, sound and codex entry the game shows
 const evApi = {
   giveRelic(rar) {
-    if (run.relics.length >= relicMax(run)) {
-      run.coins += 4;
-      return 'ช่องเครื่องรางเต็ม ได้เงิน +4 แทน';
-    }
-    let pool = RELIC_KEYS.filter(k => !hasRelic(run.relics, k) && (!rar || RELICS[k].rar === rar));
-    if (!pool.length) pool = RELIC_KEYS.filter(k => !hasRelic(run.relics, k));
-    const id = pool[R(pool.length)];
-    run.relics.push({ id, n: 0 });
+    const r = RULES.eventApi(run).giveRelic(rar);
+    if (r.full) return 'ช่องเครื่องรางเต็ม ได้เงิน +4 แทน';
     SND.play('coin');
-    cxSee('r:' + id);
-    return `<span class="ri-line">${relicIcon(id)}<span>ได้เครื่องราง <b>${RELICS[id].name}</b>: ${RELICS[id].text}</span></span>`;
+    cxSee('r:' + r.id);
+    return `<span class="ri-line">${relicIcon(r.id)}<span>ได้เครื่องราง <b>${RELICS[r.id].name}</b>: ${RELICS[r.id].text}</span></span>`;
   },
   sellWeakest(v) {
-    const sc = id => DICE[id].faces.reduce((a, f) => a + faceScore(f), 0) + (SKILLS[id] ? 3 : 0);
-    let wi = 0;
-    run.dice.forEach((d, i) => {
-      if (sc(d) < sc(run.dice[wi])) wi = i;
-    });
-    const [gone] = run.dice.splice(wi, 1);
-    run.coins += v;
-    return `ขาย${DICE[gone].name}ไป ได้เงิน +${v}`;
+    const r = RULES.eventApi(run).sellWeakest(v);
+    return `ขาย${DICE[r.gone].name}ไป ได้เงิน +${v}`;
   },
   upgradeRandom(n, steps) {
-    steps = steps || 1;
-    run.ups = run.ups || {};
-    const kinds = [...new Set(run.dice)]
-      .filter(id => upLv(id) < UP_MAX)
-      .sort(() => Math.random() - 0.5)
-      .slice(0, n);
-    if (!kinds.length) {
-      run.coins += 4;
-      return 'อสูรทุกตัวแข็งแกร่งสุดแล้ว ได้เงิน +4 แทน';
-    }
-    kinds.forEach(id => {
-      run.ups[id] = Math.min(UP_MAX, upLv(id) + steps);
-    });
+    const r = RULES.eventApi(run).upgradeRandom(n, steps);
+    if (r.none) return 'อสูรทุกตัวแข็งแกร่งสุดแล้ว ได้เงิน +4 แทน';
     SND.play('combo', 1);
-    return `ปลุกพลัง ${kinds.map(id => `<b>${DICE[id].name}</b>`).join(', ')} +${steps} ขั้น ทุกหน้าแรงขึ้น`;
+    return `ปลุกพลัง ${r.kinds.map(id => `<b>${DICE[id].name}</b>`).join(', ')} +${r.steps} ขั้น ทุกหน้าแรงขึ้น`;
   },
   upgradeAll() {
-    run.ups = run.ups || {};
-    [...new Set(run.dice)].forEach(id => {
-      run.ups[id] = Math.min(UP_MAX, upLv(id) + 1);
-    });
+    RULES.eventApi(run).upgradeAll();
     SND.play('combo', 2);
     return 'ดวงดาวส่องลงมา อสูรทุกชนิดในถุงปลุกพลัง +1 ขั้น';
   },
   tradeUp() {
-    const sc = id => DICE[id].faces.reduce((a, f) => a + faceScore(f), 0) + (SKILLS[id] ? 3 : 0);
-    let wi = 0;
-    run.dice.forEach((d, i) => {
-      if (sc(d) < sc(run.dice[wi])) wi = i;
-    });
-    const gone = run.dice[wi],
-      t = Math.min(3, DICE[gone].tier + 1),
-      lk = lockedDice();
-    const pool = Object.keys(DICE).filter(k => DICE[k].tier === t && !lk.includes(k) && k !== gone);
-    if (!pool.length) {
-      run.coins += 6;
-      return 'กูลไม่มีอะไรดีกว่าให้แลก มันยื่นเหรียญให้ 6 แทน';
-    }
-    const nw = pool[R(pool.length)];
-    run.dice[wi] = nw;
-    cxSee('d:' + nw);
-    return `กูลรับ${DICE[gone].name}ไป แล้วส่ง <b>${DICE[nw].name}</b> ให้คุณแทน`;
+    const r = RULES.eventApi(run, lockedDice()).tradeUp();
+    if (r.none) return 'กูลไม่มีอะไรดีกว่าให้แลก มันยื่นเหรียญให้ 6 แทน';
+    cxSee('d:' + r.nw);
+    return `กูลรับ${DICE[r.gone].name}ไป แล้วส่ง <b>${DICE[r.nw].name}</b> ให้คุณแทน`;
   },
   giveDie(id) {
-    if (run.dice.length >= 6) {
-      run.coins += 4;
-      return 'ถุงเต็มแล้ว แมวเลยคาบเหรียญมาให้แทน เงิน +4';
-    }
-    run.dice.push(id);
+    const r = RULES.eventApi(run).giveDie(id);
+    if (r.full) return 'ถุงเต็มแล้ว แมวเลยคาบเหรียญมาให้แทน เงิน +4';
     cxSee('d:' + id);
     return `${DICE[id].name}เข้ามาอยู่ในถุงของคุณ`;
   },
@@ -7955,9 +8118,7 @@ const SPECIALS = {
     },
   },
 };
-function price(n) {
-  return n <= 0 ? 0 : Math.max(1, n - (hasRelic(run.relics, 'key') ? 1 : 0));
-}
+const price = n => RULES.shopPrice(n, run.relics);
 function showRunShop(resumed) {
   if (!run.shop) {
     const sp = Object.keys(SPECIALS)
@@ -8023,8 +8184,8 @@ function showRunShop(resumed) {
       <div class="up-btns"><button class="btn ${can ? 'primary' : ''}" data-up="${id}" ${can ? '' : 'disabled'}>${max ? 'เต็มแล้ว' : `ปลุก ◉ ${c}`}</button><button class="btn mini" data-rel="${id}" ${canRel ? '' : 'disabled'} title="ปล่อยอสูรลูกนี้ออกจากถุง 1 ลูก">ปล่อย ◉ ${rc}</button></div></div>`;
     })
     .join('');
-  const pc = price(3 + 2 * sh.pot),
-    cc = price(3 + 2 * sh.calm);
+  const pc = RULES.potionCost(sh.pot, run.relics),
+    cc = RULES.incenseCost(sh.calm, run.relics);
   $('#rs-heal').innerHTML =
     `<div class="up-row"><span class="ri big-ic hp">${icon('heal')}</span><div class="si-meta"><b>ยาสมุนไพรจากอุลธาร์</b><span class="dim">เลือด +12 (ตอนนี้ ${run.hp}/${run.maxHp}) ราคาขึ้นทุกขวด</span></div><button class="btn" data-pot ${run.coins >= pc && run.hp < run.maxHp ? '' : 'disabled'}>◉ ${pc}</button></div>
     <div class="up-row"><span class="ri big-ic sn">${icon('san')}</span><div class="si-meta"><b>ธูปชำระใจ</b><span class="dim">สติ +5 (ตอนนี้ ${run.san}/${run.maxSan}) ราคาขึ้นทุกครั้ง</span></div><button class="btn" data-calm ${run.coins >= cc && run.san < run.maxSan ? '' : 'disabled'}>◉ ${cc}</button></div>`;
@@ -8086,20 +8247,14 @@ $('#s-rshop').addEventListener('click', ev => {
     return showRunShop();
   }
   if ((b = ev.target.closest('[data-pot]')) && !b.disabled) {
-    const c = price(3 + 2 * sh.pot);
-    if (run.coins < c) return;
-    run.coins -= c;
-    sh.pot++;
-    run.hp = Math.min(run.maxHp, run.hp + 12);
+    if (run.coins < RULES.potionCost(sh.pot, run.relics)) return;
+    RULES.drinkPotion(run, sh.pot++);
     SND.play('heal');
     return showRunShop();
   }
   if ((b = ev.target.closest('[data-calm]')) && !b.disabled) {
-    const c = price(3 + 2 * sh.calm);
-    if (run.coins < c) return;
-    run.coins -= c;
-    sh.calm++;
-    run.san = Math.min(run.maxSan, run.san + 5);
+    if (run.coins < RULES.incenseCost(sh.calm, run.relics)) return;
+    RULES.burnIncense(run, sh.calm++);
     SND.play('san');
     return showRunShop();
   }
@@ -8483,69 +8638,6 @@ function render(rolled) {
   saveRun('battle');
 }
 
-/* ---------- button wiring ---------- */
-$('#legend').innerHTML = Object.entries(TYPES)
-  .map(([t, o]) => `<div>${faceHTML({ t, v: '' }, 'sm')}<span>${o.l}</span></div>`)
-  .join('');
-$('#glossary').innerHTML = Object.entries(TYPES)
-  .map(([t, o]) => `<div>${faceHTML({ t, v: '' }, 'sm')}<span><b>${o.l}</b>${GLOSS[t]}</span></div>`)
-  .join('');
-$('#glossary-e').innerHTML = Object.entries(EGLOSS)
-  .map(
-    ([t, [l, d]]) =>
-      `<div><span style="color:${ECOL[t]};display:grid;place-items:center">${icon(t)}</span><span><b>${l}</b>${d}</span></div>`
-  )
-  .join('');
-function openHelp() {
-  $('#m-dice').innerHTML = run ? run.dice.map(id => dieCard(id)).join('') : '';
-  $('#modal').hidden = false;
-  $('#b-close').focus();
-}
-function closeHelp() {
-  $('#modal').hidden = true;
-}
-$('#b-help').onclick = openHelp;
-$('#b-close').onclick = () => {
-  closeHelp();
-  $('#b-help').focus();
-};
-$('#modal').addEventListener('click', ev => {
-  if (ev.target.id === 'modal') closeHelp();
-});
-document.addEventListener('keydown', ev => {
-  if (ev.key === 'Escape') closeHelp();
-});
-
-$('#b-tut').onclick = () => startChapter(0);
-$('#b-continue').onclick = resumeRun;
-$('#b-run').onclick = () => {
-  if (load(SAVEKEY, null)) {
-    $('#b-run-confirm').hidden = false;
-    $('#b-run-confirm').focus();
-  } else beginRunFlow();
-};
-$('#b-run-confirm').onclick = () => {
-  store(SAVEKEY, null);
-  beginRunFlow();
-};
-$('#rb-relic').onclick = () => {
-  SND.play('ui');
-  openBag('relic');
-};
-$('#rb-bag').onclick = () => {
-  SND.play('ui');
-  openBag('bag');
-};
-$('#bm-close').onclick = () => {
-  $('#bagmodal').hidden = true;
-};
-$('#bagmodal').addEventListener('click', ev => {
-  if (ev.target.id === 'bagmodal') $('#bagmodal').hidden = true;
-});
-document.addEventListener('keydown', ev => {
-  if (ev.key === 'Escape') $('#bagmodal').hidden = true;
-});
-
 /* ---------- tooltips: hover on desktop, press-and-hold on phones ---------- */
 const tipBox = document.createElement('div');
 tipBox.id = 'tipbox';
@@ -8633,6 +8725,70 @@ document.addEventListener('contextmenu', ev => {
   if (ev.target.closest('[data-tip]')) ev.preventDefault();
 });
 window.addEventListener('scroll', hideTip, { passive: true });
+
+/* ---------- help modal, glossary, button wiring ---------- */
+$('#legend').innerHTML = Object.entries(TYPES)
+  .map(([t, o]) => `<div>${faceHTML({ t, v: '' }, 'sm')}<span>${o.l}</span></div>`)
+  .join('');
+$('#glossary').innerHTML = Object.entries(TYPES)
+  .map(([t, o]) => `<div>${faceHTML({ t, v: '' }, 'sm')}<span><b>${o.l}</b>${GLOSS[t]}</span></div>`)
+  .join('');
+$('#glossary-e').innerHTML = Object.entries(EGLOSS)
+  .map(
+    ([t, [l, d]]) =>
+      `<div><span style="color:${ECOL[t]};display:grid;place-items:center">${icon(t)}</span><span><b>${l}</b>${d}</span></div>`
+  )
+  .join('');
+function openHelp() {
+  $('#m-dice').innerHTML = run ? run.dice.map(id => dieCard(id)).join('') : '';
+  $('#modal').hidden = false;
+  $('#b-close').focus();
+}
+function closeHelp() {
+  $('#modal').hidden = true;
+}
+$('#b-help').onclick = openHelp;
+$('#b-close').onclick = () => {
+  closeHelp();
+  $('#b-help').focus();
+};
+$('#modal').addEventListener('click', ev => {
+  if (ev.target.id === 'modal') closeHelp();
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') closeHelp();
+});
+
+$('#b-tut').onclick = () => startChapter(0);
+$('#b-continue').onclick = resumeRun;
+$('#b-run').onclick = () => {
+  if (load(SAVEKEY, null)) {
+    $('#b-run-confirm').hidden = false;
+    $('#b-run-confirm').focus();
+  } else beginRunFlow();
+};
+$('#b-run-confirm').onclick = () => {
+  store(SAVEKEY, null);
+  beginRunFlow();
+};
+$('#rb-relic').onclick = () => {
+  SND.play('ui');
+  openBag('relic');
+};
+$('#rb-bag').onclick = () => {
+  SND.play('ui');
+  openBag('bag');
+};
+$('#bm-close').onclick = () => {
+  $('#bagmodal').hidden = true;
+};
+$('#bagmodal').addEventListener('click', ev => {
+  if (ev.target.id === 'bagmodal') $('#bagmodal').hidden = true;
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') $('#bagmodal').hidden = true;
+});
+
 $('#b-onward').onclick = () => {
   SND.play('ui');
   onward();
@@ -8685,19 +8841,9 @@ document.addEventListener(
   'pointerdown',
   () => {
     SND.unlock();
-    if (!musicStarted) {
-      musicStarted = true;
-      musicFor();
-    }
   },
   { once: false, passive: true }
 );
-let musicStarted = false;
-function musicFor() {
-  if (!musicStarted) return;
-  const onBattle = !$('#s-battle').hidden && battle && battle.e;
-  SND.music(run && run.ch && $('#s-title').hidden ? run.ch.id : 'title', !!(onBattle && battle.e.boss));
-}
 $('#b-codex').onclick = () => openCodex('title');
 $('#b-help-codex').onclick = () => {
   const cur = ['choose', 'battle', 'reward', 'inter', 'chapters', 'end'].find(id => !$('#s-' + id).hidden) || 'title';
@@ -8728,13 +8874,8 @@ $('#b-back').onclick = () => {
   renderTitle();
   show('title');
 };
-renderTitle();
-show('splash');
 $('#b-start').onclick = () => {
   SND.unlock();
-  if (!musicStarted) {
-    musicStarted = true;
-  }
   SND.play('chapter');
   document.body.classList.add('sp-leave');
   setTimeout(() => {
@@ -8817,8 +8958,7 @@ $('#r-list').addEventListener('click', ev => {
   if (t.dataset.summon) summon(t.dataset.summon);
   else if ('rest' in t.dataset) {
     SND.play('heal');
-    run.hp = Math.min(run.maxHp, run.hp + restAmt());
-    run.san = Math.min(run.maxSan, run.san + 5);
+    RULES.restPick(run);
     nextStage();
   } else if (t.dataset.drop !== undefined) {
     run.dice.splice(+t.dataset.drop, 1);
@@ -8827,6 +8967,10 @@ $('#r-list').addEventListener('click', ev => {
   } else if ('skip' in t.dataset) nextStage();
   else if ('cancel' in t.dataset) showReward(true);
 });
+
+/* ---------- start: everything above is declared, show the first screen ---------- */
+renderTitle();
+show('splash');
 </script>
 <script src="spr.js" async></script>
 </body>

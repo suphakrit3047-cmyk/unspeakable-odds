@@ -57,9 +57,7 @@ const SPECIALS = {
     },
   },
 };
-function price(n) {
-  return n <= 0 ? 0 : Math.max(1, n - (hasRelic(run.relics, 'key') ? 1 : 0));
-}
+const price = n => RULES.shopPrice(n, run.relics);
 function showRunShop(resumed) {
   if (!run.shop) {
     const sp = Object.keys(SPECIALS)
@@ -125,8 +123,8 @@ function showRunShop(resumed) {
       <div class="up-btns"><button class="btn ${can ? 'primary' : ''}" data-up="${id}" ${can ? '' : 'disabled'}>${max ? 'เต็มแล้ว' : `ปลุก ◉ ${c}`}</button><button class="btn mini" data-rel="${id}" ${canRel ? '' : 'disabled'} title="ปล่อยอสูรลูกนี้ออกจากถุง 1 ลูก">ปล่อย ◉ ${rc}</button></div></div>`;
     })
     .join('');
-  const pc = price(3 + 2 * sh.pot),
-    cc = price(3 + 2 * sh.calm);
+  const pc = RULES.potionCost(sh.pot, run.relics),
+    cc = RULES.incenseCost(sh.calm, run.relics);
   $('#rs-heal').innerHTML =
     `<div class="up-row"><span class="ri big-ic hp">${icon('heal')}</span><div class="si-meta"><b>ยาสมุนไพรจากอุลธาร์</b><span class="dim">เลือด +12 (ตอนนี้ ${run.hp}/${run.maxHp}) ราคาขึ้นทุกขวด</span></div><button class="btn" data-pot ${run.coins >= pc && run.hp < run.maxHp ? '' : 'disabled'}>◉ ${pc}</button></div>
     <div class="up-row"><span class="ri big-ic sn">${icon('san')}</span><div class="si-meta"><b>ธูปชำระใจ</b><span class="dim">สติ +5 (ตอนนี้ ${run.san}/${run.maxSan}) ราคาขึ้นทุกครั้ง</span></div><button class="btn" data-calm ${run.coins >= cc && run.san < run.maxSan ? '' : 'disabled'}>◉ ${cc}</button></div>`;
@@ -188,20 +186,14 @@ $('#s-rshop').addEventListener('click', ev => {
     return showRunShop();
   }
   if ((b = ev.target.closest('[data-pot]')) && !b.disabled) {
-    const c = price(3 + 2 * sh.pot);
-    if (run.coins < c) return;
-    run.coins -= c;
-    sh.pot++;
-    run.hp = Math.min(run.maxHp, run.hp + 12);
+    if (run.coins < RULES.potionCost(sh.pot, run.relics)) return;
+    RULES.drinkPotion(run, sh.pot++);
     SND.play('heal');
     return showRunShop();
   }
   if ((b = ev.target.closest('[data-calm]')) && !b.disabled) {
-    const c = price(3 + 2 * sh.calm);
-    if (run.coins < c) return;
-    run.coins -= c;
-    sh.calm++;
-    run.san = Math.min(run.maxSan, run.san + 5);
+    if (run.coins < RULES.incenseCost(sh.calm, run.relics)) return;
+    RULES.burnIncense(run, sh.calm++);
     SND.play('san');
     return showRunShop();
   }
