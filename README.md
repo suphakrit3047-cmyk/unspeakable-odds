@@ -14,20 +14,30 @@
 
 ## สำหรับคนพัฒนา
 
-ไฟล์ที่แก้จริงอยู่ใน `src/` ส่วน `index.html` กับ `spr.js` ที่หน้าแรกของ repo เป็นไฟล์ที่สร้างจากคำสั่ง build ห้ามแก้ตรง ๆ
+แก้ไฟล์ใน `src/` เท่านั้น ส่วน `index.html` กับ `spr.js` ที่หน้าแรกของ repo สร้างจากคำสั่ง build (ห้ามแก้ตรง ๆ)
 
 ```
-src/            โค้ดและข้อมูลเกม (game.html, data.js, relics.js, story.js ...)
-src/css/        สไตล์
-tools/build.py  รวมไฟล์ใน src/ เป็น index.html + spr.js
-tools/sim6.js   บอทเล่นเกมจำลอง ใช้ดูบาลานซ์
-tools/tune8.js  จูนตัวเลขศัตรูรายบทอัตโนมัติ
-tools/tests/    เทสต์เล่นทั้งเกมอัตโนมัติ
-tools/thaicheck.py  ตรวจคำภาษาไทยที่ไม่อยู่ในพจนานุกรม (ต้องลง pythainlp)
+src/
+  html/          โครงหน้าเว็บ (head.html, body.html)
+  css/           สไตล์ เรียงเป็นชั้น ไฟล์เลขมากทับไฟล์เลขน้อย
+  data/          เนื้อหาเกม: ลูกเต๋า ศัตรู บท (data.js) เครื่องราง/เหตุการณ์ (relics.js)
+                 บันทึกต้องห้าม (lore.js) เนื้อเรื่อง (story.js)
+  js/            โค้ดเกม แยกตามหน้าที่ ลำดับการโหลดอยู่ใน tools/build.py
+  art/           ภาพอสูรและไอคอนเครื่องราง (WebP แบบ base64)
+tools/
+  build.py       รวม src/ เป็น index.html + spr.js
+  sim.js         บอทเล่นเกมจำลอง ใช้ดูบาลานซ์
+  tune.js        จูนตัวเลขศัตรูรายบทอัตโนมัติ
+  thaicheck.py   หาคำไทยที่ไม่อยู่ในพจนานุกรม (ต้องลง pythainlp)
+  tests/         เทสต์เล่นทั้งเกมอัตโนมัติ (jsdom)
 ```
 
 ```
 npm install
-npm test          # build แล้วรันเทสต์ทั้งหมด
-npm run sim       # ดูบาลานซ์จากบอท
+npm test             # build แล้วรันเทสต์ทั้งหมด
+npm run sim          # ดูบาลานซ์จากบอท
+npm run thai-check   # ตรวจคำภาษาไทย
+npm run format       # จัดรูปแบบโค้ด (prettier)
 ```
+
+ถ้าแก้กฎการต่อสู้ใน `src/js/battle.js` ต้องแก้ใน `tools/sim.js` ให้ตรงกันด้วย ไม่อย่างนั้นผลบาลานซ์จากบอทจะเพี้ยน

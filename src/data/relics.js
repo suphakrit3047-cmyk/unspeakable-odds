@@ -100,7 +100,6 @@ function applyRelics(list, c) {
   return steps;
 }
 function hasRelic(list, id) { return (list || []).some(function (r) { return r.id === id; }); }
-function relicPrice(id) { return RELICS[id].cost; }
 function sellPrice(id) { return Math.max(1, Math.floor(RELICS[id].cost / 2)); }
 function shopRelics(list, n, rnd) {
   rnd = rnd || Math.random;

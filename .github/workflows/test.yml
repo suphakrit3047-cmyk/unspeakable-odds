@@ -10,6 +10,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: npm install
+      - run: npx prettier --check "src/js/*.js" "src/css/*.css" "tools/**/*.js"
       - run: npm test
       - name: built files are up to date
         run: git diff --exit-code index.html spr.js || (echo "Run: python3 tools/build.py" && exit 1)
